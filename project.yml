@@ -1,0 +1,43 @@
+name: GeminiLive
+options:
+  bundleIdPrefix: com.custom
+  deploymentTarget:
+    iOS: "12.0"
+
+packages:
+  Starscream:
+    url: https://github.com/daltoniam/Starscream.git
+    exactVersion: 3.1.1
+
+targets:
+  GeminiLive:
+    type: application
+    platform: iOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: Starscream
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.custom.geminilive.ios12
+        MARKETING_VERSION: 1.0.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: 5.0
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_BITCODE: NO
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: "Gemini Live"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchStoryboardName: ""
+        UIRequiresFullScreen: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: "Ứng dụng cần quyền Micro để đàm thoại trực tiếp với Gemini Live."
+        NSCameraUsageDescription: "Ứng dụng cần quyền Camera để truyền hình ảnh trực tiếp cho Gemini."
+        UIBackgroundModes:
+          - audio
