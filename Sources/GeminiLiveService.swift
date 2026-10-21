@@ -27,6 +27,10 @@ final class GeminiLiveService: NSObject {
         case vertexExpressAQ = 2
     }
 
+    // 1. Đặt model mặc định mới và tự động nâng cấp nếu máy đang lưu model cũ đã bị khai tử
+    private let defaultStudioModel = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    private let defaultVertexModel = "gemini-live-2.5-flash-native-audio"
+
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: "gemini_api_key") ?? "" }
         set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_api_key") }
@@ -34,15 +38,24 @@ final class GeminiLiveService: NSObject {
 
     var modelName: String {
         get {
-            let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? "models/gemini-2.0-flash-exp"
-            if saved.isEmpty || saved == "models/gemini-2.0-flash-live-001" {
-                return "models/gemini-2.0-flash-exp"
+            let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? defaultStudioModel
+            let retiredModels: Set<String> = [
+                "",
+                "gemini-2.0-flash-exp",
+                "models/gemini-2.0-flash-exp",
+                "gemini-2.0-flash-live-001",
+                "models/gemini-2.0-flash-live-001",
+                "gemini-live-2.5-flash-preview",
+                "models/gemini-live-2.5-flash-preview"
+            ]
+            if retiredModels.contains(saved) {
+                return defaultStudioModel
             }
             return saved
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            UserDefaults.standard.set(trimmed.isEmpty ? "models/gemini-2.0-flash-exp" : trimmed, forKey: "gemini_model")
+            UserDefaults.standard.set(trimmed.isEmpty ? defaultStudioModel : trimmed, forKey: "gemini_model")
         }
     }
 
@@ -92,8 +105,9 @@ final class GeminiLiveService: NSObject {
 
     override init() {
         super.init()
-        if UserDefaults.standard.string(forKey: "gemini_model") == "models/gemini-2.0-flash-live-001" {
-            UserDefaults.standard.set("models/gemini-2.0-flash-exp", forKey: "gemini_model")
+        let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? ""
+        if saved.contains("gemini-2.0-flash") || saved == "models/gemini-live-2.5-flash-preview" {
+            UserDefaults.standard.set(defaultStudioModel, forKey: "gemini_model")
         }
         audioEngine.attach(playerNode)
         isPlayerNodeAttached = true
@@ -108,7 +122,8 @@ final class GeminiLiveService: NSObject {
             return
         }
 
-        activeRoute = .v1BetaStandard
+        // Nếu là khóa Vertex Express (AQ.), kết nối thẳng vào cổng Vertex AI
+        activeRoute = trimmedKey.hasPrefix("AQ.") ? .vertexExpressAQ : .v1BetaEnhanced
         openWebSocketConnection(withKey: trimmedKey, route: activeRoute)
     }
 
@@ -182,23 +197,15 @@ final class GeminiLiveService: NSObject {
     }
 
     private func tryNextFallbackRoute(withKey key: String) -> Bool {
-        let isAQKey = key.hasPrefix("AQ.")
+        if key.hasPrefix("AQ.") {
+            return false // Khóa AQ. chỉ dùng trên endpoint Vertex AI
+        }
         switch activeRoute {
-        case .v1BetaStandard:
-            if isAQKey {
-                activeRoute = .vertexExpressAQ
-                openWebSocketConnection(withKey: key, route: .vertexExpressAQ)
-                return true
-            } else {
-                activeRoute = .v1BetaEnhanced
-                openWebSocketConnection(withKey: key, route: .v1BetaEnhanced)
-                return true
-            }
-        case .vertexExpressAQ:
-            activeRoute = .v1BetaEnhanced
-            openWebSocketConnection(withKey: key, route: .v1BetaEnhanced)
-            return true
         case .v1BetaEnhanced:
+            activeRoute = .v1BetaStandard
+            openWebSocketConnection(withKey: key, route: .v1BetaStandard)
+            return true
+        case .v1BetaStandard, .vertexExpressAQ:
             return false
         }
     }
@@ -279,19 +286,23 @@ final class GeminiLiveService: NSObject {
 
     private func resolvedModelPath(for route: ConnectionRoute) -> String {
         let raw = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanName: String
+        var cleanName: String
         if raw.hasPrefix("publishers/google/models/") {
             cleanName = String(raw.dropFirst("publishers/google/models/".count))
         } else if raw.hasPrefix("models/") {
             cleanName = String(raw.dropFirst("models/".count))
         } else {
-            cleanName = raw.isEmpty ? "gemini-2.0-flash-exp" : raw
+            cleanName = raw.isEmpty ? "gemini-2.5-flash-native-audio-preview-12-2025" : raw
         }
 
         switch route {
         case .v1BetaStandard, .v1BetaEnhanced:
             return "models/\(cleanName)"
         case .vertexExpressAQ:
+            // Nếu người dùng đang để mặc định model của AI Studio khi dùng khóa AQ., tự chuyển sang tên model chuẩn của Vertex
+            if cleanName == "gemini-2.5-flash-native-audio-preview-12-2025" {
+                cleanName = defaultVertexModel
+            }
             return "publishers/google/models/\(cleanName)"
         }
     }
