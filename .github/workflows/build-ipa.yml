@@ -1,0 +1,47 @@
+name: Build GeminiLive iOS 12 IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build Unsigned Archive for iOS 12 (arm64)
+        run: |
+          xcodebuild clean archive \
+            -project GeminiLive.xcodeproj \
+            -scheme GeminiLive \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath $RUNNER_TEMP/GeminiLive.xcarchive \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            ARCHS="arm64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package into .ipa for Sideloadly
+        run: |
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -r $RUNNER_TEMP/GeminiLive.xcarchive/Products/Applications/GeminiLive.app $RUNNER_TEMP/Payload/
+          cd $RUNNER_TEMP
+          zip -r9 GeminiLive-iOS12.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminiLive-iOS12-IPA
+          path: ${{ runner.temp }}/GeminiLive-iOS12.ipa
