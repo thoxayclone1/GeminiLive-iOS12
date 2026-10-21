@@ -16,7 +16,9 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode Project
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          sed -i '' -E 's/objectVersion = [0-9]+/objectVersion = 56/' GeminiLive.xcodeproj/project.pbxproj
 
       - name: Build Unsigned Archive for iOS 12 (arm64)
         run: |
