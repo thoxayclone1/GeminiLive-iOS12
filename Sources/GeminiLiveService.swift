@@ -128,6 +128,13 @@ final class GeminiLiveService: NSObject {
     }
 
     private func openWebSocketConnection(withKey key: String, route: ConnectionRoute) {
+        // Kiểm tra nếu dùng khóa AQ. (Express Mode) mà không có đường dẫn projects/...
+        if route == .vertexExpressAQ && !modelName.contains("projects/") {
+            delegate?.didEncounterError("Khóa AQ. (Vertex Express) không hỗ trợ Live API. Vui lòng dùng khóa AIzaSy... từ Google AI Studio.")
+            state = .disconnected
+            return
+        }
+
         isUserInitiatedDisconnect = true
         socket?.disconnect()
         socket = nil
@@ -145,7 +152,8 @@ final class GeminiLiveService: NSObject {
         case .v1BetaStandard, .v1BetaEnhanced:
             urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
         case .vertexExpressAQ:
-            urlString = "wss://aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?key=\(encodedKey)"
+            let location = extractLocation(from: modelName) ?? "us-central1"
+            urlString = "wss://\(location)-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?key=\(encodedKey)"
         }
 
         guard let url = URL(string: urlString) else {
@@ -194,6 +202,14 @@ final class GeminiLiveService: NSObject {
         }
         self.socket = ws
         ws.connect()
+    }
+
+    private func extractLocation(from path: String) -> String? {
+        let components = path.split(separator: "/").map(String.init)
+        if let locIndex = components.firstIndex(of: "locations"), locIndex + 1 < components.count {
+            return components[locIndex + 1]
+        }
+        return nil
     }
 
     private func tryNextFallbackRoute(withKey key: String) -> Bool {
@@ -286,7 +302,13 @@ final class GeminiLiveService: NSObject {
 
     private func resolvedModelPath(for route: ConnectionRoute) -> String {
         let raw = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        var cleanName: String
+
+        // Giữ nguyên nếu người dùng đã nhập đầy đủ đường dẫn dự án Vertex AI
+        if raw.hasPrefix("projects/") {
+            return raw
+        }
+
+        let cleanName: String
         if raw.hasPrefix("publishers/google/models/") {
             cleanName = String(raw.dropFirst("publishers/google/models/".count))
         } else if raw.hasPrefix("models/") {
@@ -299,10 +321,6 @@ final class GeminiLiveService: NSObject {
         case .v1BetaStandard, .v1BetaEnhanced:
             return "models/\(cleanName)"
         case .vertexExpressAQ:
-            // Nếu người dùng đang để mặc định model của AI Studio khi dùng khóa AQ., tự chuyển sang tên model chuẩn của Vertex
-            if cleanName == "gemini-2.5-flash-native-audio-preview-12-2025" {
-                cleanName = defaultVertexModel
-            }
             return "publishers/google/models/\(cleanName)"
         }
     }
