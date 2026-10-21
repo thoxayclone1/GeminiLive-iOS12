@@ -12,18 +12,41 @@ enum LiveState {
     case muted              // Đang tắt Mic
 }
 
+/// Danh sách các giọng Nữ chuẩn của Gemini Live
+struct GeminiFemaleVoice {
+    let id: String
+    let title: String
+    let styleDescription: String
+
+    static let allVoices: [GeminiFemaleVoice] = [
+        GeminiFemaleVoice(id: "Aoede", title: "Aoede (Mặc định)", styleDescription: "Ấm áp, truyền cảm, giàu chất thơ & sáng tạo"),
+        GeminiFemaleVoice(id: "Kore", title: "Kore", styleDescription: "Trong trẻo, trẻ trung, sắc sảo & năng động"),
+        GeminiFemaleVoice(id: "Leda", title: "Leda", styleDescription: "Dịu dàng, thanh lịch, nhẹ nhàng & sâu lắng"),
+        GeminiFemaleVoice(id: "Zephyr", title: "Zephyr", styleDescription: "Tươi sáng, hiện đại, hào hứng & giàu năng lượng"),
+        GeminiFemaleVoice(id: "Callirrhoe", title: "Callirrhoe", styleDescription: "Mượt mà, tự nhiên, cuốn hút & tinh tế")
+    ]
+
+    static let validIds: Set<String> = Set(allVoices.map { $0.id })
+}
+
 protocol GeminiLiveServiceDelegate: AnyObject {
     func didChangeState(_ state: LiveState)
     func didUpdateAudioLevel(_ level: CGFloat)
-    func didUpdateTranscript(userText: String?, geminiText: String?)
+    func didUpdateTranscript(userText: String?, geminiText: String?, isTurnComplete: Bool)
     func didEncounterError(_ message: String)
 }
 
 final class GeminiLiveService: NSObject {
     weak var delegate: GeminiLiveServiceDelegate?
 
-    // Model mặc định thế hệ mới nhất theo chuẩn AI Studio Live API
-    private let defaultModel = "models/gemini-3.8-live"
+    private let defaultModel = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    private let defaultFemaleVoice = "Aoede"
+    private let defaultCreativePrompt = """
+    Bạn là một nữ trợ lý AI thông minh, giàu cảm hứng sáng tạo, tinh tế và cuốn hút. \
+    Hãy trò chuyện tự nhiên bằng tiếng Việt với giọng điệu truyền cảm, sinh động và giàu chiều sâu. \
+    Sau mỗi câu trả lời, hãy luôn chủ động gợi ý thêm 2 đến 3 ý tưởng sáng tạo, góc nhìn mới mẻ \
+    hoặc câu hỏi mở thú vị để khơi gợi cảm hứng cho người dùng.
+    """
 
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: "gemini_api_key") ?? "" }
@@ -38,10 +61,7 @@ final class GeminiLiveService: NSObject {
                 "gemini-2.0-flash-exp",
                 "models/gemini-2.0-flash-exp",
                 "gemini-2.0-flash-live-001",
-                "models/gemini-2.0-flash-live-001",
-                "gemini-live-2.5-flash-preview",
-                "models/gemini-live-2.5-flash-preview",
-                "models/gemini-3.1-flash-live-preview"
+                "models/gemini-2.0-flash-live-001"
             ]
             if retiredModels.contains(saved) || saved.contains("projects/") || saved.contains("publishers/") {
                 return defaultModel
@@ -58,20 +78,38 @@ final class GeminiLiveService: NSObject {
         }
     }
 
+    /// Chỉ sử dụng giọng Nữ; tự động chuyển các giọng Nam cũ (Puck, Charon, Fenrir, Orus) sang Aoede
     var voiceName: String {
-        get { UserDefaults.standard.string(forKey: "gemini_voice") ?? "Puck" }
-        set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_voice") }
+        get {
+            let saved = UserDefaults.standard.string(forKey: "gemini_voice") ?? defaultFemaleVoice
+            if GeminiFemaleVoice.validIds.contains(saved) {
+                return saved
+            }
+            return defaultFemaleVoice
+        }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolved = GeminiFemaleVoice.validIds.contains(trimmed) ? trimmed : defaultFemaleVoice
+            UserDefaults.standard.set(resolved, forKey: "gemini_voice")
+        }
     }
 
     var systemPrompt: String {
         get {
-            UserDefaults.standard.string(forKey: "gemini_sys_prompt")
-            ?? "Bạn là trợ lý AI thông minh, trả lời ngắn gọn, tự nhiên bằng tiếng Việt."
+            let saved = UserDefaults.standard.string(forKey: "gemini_sys_prompt") ?? ""
+            // Tự động nâng cấp nếu đang dùng prompt mặc định cũ ("trả lời ngắn gọn")
+            if saved.isEmpty || saved == "Bạn là trợ lý AI thông minh, trả lời ngắn gọn, tự nhiên bằng tiếng Việt." {
+                return defaultCreativePrompt
+            }
+            return saved
         }
-        set { UserDefaults.standard.set(newValue, forKey: "gemini_sys_prompt") }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed.isEmpty ? defaultCreativePrompt : trimmed, forKey: "gemini_sys_prompt")
+        }
     }
 
-    var isManualTurnMode: Bool = false // Mặc định bật Tự động (VAD) để đàm thoại tự nhiên ngay khi kết nối
+    var isManualTurnMode: Bool = false
     private(set) var isMuted: Bool = false
     private(set) var state: LiveState = .disconnected {
         didSet {
@@ -102,13 +140,16 @@ final class GeminiLiveService: NSObject {
     private var speechEndCooldownUntil: TimeInterval = 0
     private var currentUserTranscript = ""
     private var currentGeminiTranscript = ""
+    private var didReceiveOutputTranscriptionInTurn = false
 
     override init() {
         super.init()
-        let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? ""
-        if saved.contains("projects/") || saved.contains("gemini-2.0") {
-            UserDefaults.standard.set(defaultModel, forKey: "gemini_model")
+        // Đảm bảo loại bỏ giọng nam đã lưu trước đó trong UserDefaults
+        let savedVoice = UserDefaults.standard.string(forKey: "gemini_voice") ?? ""
+        if !GeminiFemaleVoice.validIds.contains(savedVoice) {
+            UserDefaults.standard.set(defaultFemaleVoice, forKey: "gemini_voice")
         }
+
         audioEngine.attach(playerNode)
         isPlayerNodeAttached = true
         audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
@@ -137,6 +178,9 @@ final class GeminiLiveService: NSObject {
         isManualTurnActive = false
         isServerTurnComplete = true
         scheduledBuffersCount = 0
+        currentUserTranscript = ""
+        currentGeminiTranscript = ""
+        didReceiveOutputTranscriptionInTurn = false
 
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
         let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
@@ -220,7 +264,6 @@ final class GeminiLiveService: NSObject {
     func finishUserTurnManually() {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
 
-        // Nếu Gemini đang nói, chạm quả cầu sẽ ngắt lời ngay lập tức để người dùng nói
         if state == .geminiSpeaking {
             interruptPlayback()
             state = isMuted ? .muted : .listeningUser
@@ -230,7 +273,6 @@ final class GeminiLiveService: NSObject {
         guard isManualTurnMode else { return }
 
         if isManualTurnActive {
-            // Chuẩn v1beta: Dùng activityEnd thay vì clientContent.turnComplete rỗng
             let payload: [String: Any] = [
                 "realtimeInput": [
                     "activityEnd": [:]
@@ -242,13 +284,47 @@ final class GeminiLiveService: NSObject {
         }
     }
 
+    /// Gửi gợi ý sáng tạo 1-chạm trực tiếp tới Gemini Live
+    func sendCreativePrompt(_ promptText: String) {
+        guard isSetupComplete, let ws = socket, ws.isConnected else {
+            delegate?.didEncounterError("Hãy nhấn ▶️ Bắt đầu kết nối trước khi chọn gợi ý sáng tạo.")
+            return
+        }
+
+        if state == .geminiSpeaking {
+            interruptPlayback()
+        }
+
+        currentUserTranscript = promptText
+        currentGeminiTranscript = ""
+        didReceiveOutputTranscriptionInTurn = false
+
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.didUpdateTranscript(userText: promptText, geminiText: nil, isTurnComplete: false)
+            self?.state = .waitingResponse
+        }
+
+        let payload: [String: Any] = [
+            "clientContent": [
+                "turns": [
+                    [
+                        "role": "user",
+                        "parts": [
+                            ["text": promptText]
+                        ]
+                    ]
+                ],
+                "turnComplete": true
+            ]
+        ]
+        sendJSON(payload)
+    }
+
     func sendVideoFrame(jpegData: Data) {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
-        // Không gửi frame khi đang đợi hoặc khi đã tắt mic ở chế độ thủ công
         if state == .waitingResponse { return }
 
         let base64Image = jpegData.base64EncodedString()
-        // Chuẩn v1beta: Dùng trường "video" thay vì "mediaChunks"
         let payload: [String: Any] = [
             "realtimeInput": [
                 "video": [
@@ -265,8 +341,8 @@ final class GeminiLiveService: NSObject {
         if raw.hasPrefix("models/") {
             return raw
         }
-        let cleanName = raw.isEmpty ? "gemini-3.8-live" : raw
-        return "models/\(cleanName)"
+        let cleanName = raw.isEmpty ? defaultModel : "models/\(raw)"
+        return cleanName
     }
 
     private func sendInitialSetup() {
@@ -276,6 +352,7 @@ final class GeminiLiveService: NSObject {
             "model": formattedModel,
             "generationConfig": [
                 "responseModalities": ["AUDIO"],
+                "temperature": 1.0,
                 "speechConfig": [
                     "voiceConfig": [
                         "prebuiltVoiceConfig": [
@@ -294,7 +371,6 @@ final class GeminiLiveService: NSObject {
         ]
 
         if isManualTurnMode {
-            // Tắt hẳn VAD phía server khi dùng chế độ Thủ công (quản lý bằng activityStart / activityEnd)
             setupContent["realtimeInputConfig"] = [
                 "automaticActivityDetection": [
                     "disabled": true
@@ -303,7 +379,6 @@ final class GeminiLiveService: NSObject {
                 "turnCoverage": "TURN_INCLUDES_ALL_INPUT"
             ]
         } else {
-            // Cấu hình VAD độ nhạy cân bằng để tránh bắt nhầm tạp âm hoặc tiếng vọng loa
             setupContent["realtimeInputConfig"] = [
                 "automaticActivityDetection": [
                     "disabled": false,
@@ -349,6 +424,10 @@ final class GeminiLiveService: NSObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.interruptPlayback()
+                self.delegate?.didUpdateTranscript(userText: nil, geminiText: nil, isTurnComplete: true)
+                self.currentUserTranscript = ""
+                self.currentGeminiTranscript = ""
+                self.didReceiveOutputTranscriptionInTurn = false
                 self.state = self.isMuted ? .muted : .listeningUser
             }
         }
@@ -358,27 +437,33 @@ final class GeminiLiveService: NSObject {
             currentUserTranscript += text
             let transcript = currentUserTranscript
             DispatchQueue.main.async { [weak self] in
-                self?.delegate?.didUpdateTranscript(userText: transcript, geminiText: nil)
+                self?.delegate?.didUpdateTranscript(userText: transcript, geminiText: nil, isTurnComplete: false)
             }
         }
 
         if let outputTranscription = serverContent["outputTranscription"] as? [String: Any],
            let text = outputTranscription["text"] as? String, !text.isEmpty {
+            didReceiveOutputTranscriptionInTurn = true
             currentGeminiTranscript += text
             let transcript = currentGeminiTranscript
             DispatchQueue.main.async { [weak self] in
-                self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript)
+                self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript, isTurnComplete: false)
             }
         }
 
         if let modelTurn = serverContent["modelTurn"] as? [String: Any],
            let parts = modelTurn["parts"] as? [[String: Any]] {
             for part in parts {
-                if let textPart = part["text"] as? String, !textPart.isEmpty {
+                // Bỏ qua thought nội bộ của model để khung Lyric chỉ hiển thị đúng lời nói
+                let isThought = (part["thought"] as? Bool) ?? false
+                if !isThought,
+                   !didReceiveOutputTranscriptionInTurn,
+                   let textPart = part["text"] as? String,
+                   !textPart.isEmpty {
                     currentGeminiTranscript += textPart
                     let transcript = currentGeminiTranscript
                     DispatchQueue.main.async { [weak self] in
-                        self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript)
+                        self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript, isTurnComplete: false)
                     }
                 }
 
@@ -393,10 +478,15 @@ final class GeminiLiveService: NSObject {
         }
 
         if let turnComplete = serverContent["turnComplete"] as? Bool, turnComplete {
+            let finalUser = currentUserTranscript.isEmpty ? nil : currentUserTranscript
+            let finalGemini = currentGeminiTranscript.isEmpty ? nil : currentGeminiTranscript
             currentUserTranscript = ""
             currentGeminiTranscript = ""
+            didReceiveOutputTranscriptionInTurn = false
+
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
+                self.delegate?.didUpdateTranscript(userText: finalUser, geminiText: finalGemini, isTurnComplete: true)
                 self.isServerTurnComplete = true
                 if self.scheduledBuffersCount == 0 && self.state != .muted {
                     self.speechEndCooldownUntil = CACurrentMediaTime() + 0.4
@@ -409,7 +499,6 @@ final class GeminiLiveService: NSObject {
     private func startAudioEngine() {
         do {
             let session = AVAudioSession.sharedInstance()
-            // Bỏ .mixWithOthers để bộ khử tiếng vọng phần cứng (AEC) của mode .voiceChat hoạt động tối đa
             try session.setCategory(
                 .playAndRecord,
                 mode: .voiceChat,
@@ -480,7 +569,6 @@ final class GeminiLiveService: NSObject {
         converter: AVAudioConverter,
         targetFormat: AVAudioFormat
     ) {
-        // Chặn thu âm khi đang tắt mic, đang chờ phản hồi, khi Gemini đang nói, hoặc trong 0.4s vừa dứt tiếng loa
         guard isSetupComplete,
               !isMuted,
               state != .waitingResponse,
@@ -524,7 +612,6 @@ final class GeminiLiveService: NSObject {
         let byteCount = Int(pcm16Buffer.frameLength) * MemoryLayout<Int16>.size
         let pcmData = Data(bytes: int16Ptr, count: byteCount)
 
-        // Nếu ở chế độ Thủ công, gửi tín hiệu activityStart ngay trước gói âm thanh đầu tiên của lượt nói
         if isManualTurnMode && !isManualTurnActive {
             isManualTurnActive = true
             let startPayload: [String: Any] = [
@@ -535,7 +622,6 @@ final class GeminiLiveService: NSObject {
             sendJSON(startPayload)
         }
 
-        // Chuẩn v1beta: Gửi qua trường "audio" thay vì "mediaChunks"
         let audioPayload: [String: Any] = [
             "realtimeInput": [
                 "audio": [
@@ -584,7 +670,6 @@ final class GeminiLiveService: NSObject {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.scheduledBuffersCount = max(0, self.scheduledBuffersCount - 1)
-                    // Chỉ mở lại Mic sau khi Server đã báo turnComplete VÀ toàn bộ buffer âm thanh đã phát xong
                     if self.scheduledBuffersCount == 0 && self.isServerTurnComplete && self.state == .geminiSpeaking {
                         self.speechEndCooldownUntil = CACurrentMediaTime() + 0.4
                         self.state = self.isMuted ? .muted : .listeningUser
