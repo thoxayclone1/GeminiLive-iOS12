@@ -72,6 +72,8 @@ final class GeminiLiveService: NSObject {
 
     override init() {
         super.init()
+        audioEngine.attach(playerNode)
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
         setupAudioSessionNotifications()
     }
 
@@ -140,7 +142,6 @@ final class GeminiLiveService: NSObject {
 
     func toggleTurnMode() {
         isManualTurnMode.toggle()
-        // Nếu đang kết nối, khởi động lại phiên nhanh để cập nhật cờ automaticActivityDetection
         if state != .disconnected {
             connect()
         }
@@ -151,7 +152,6 @@ final class GeminiLiveService: NSObject {
     func finishUserTurnManually() {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
 
-        // Nếu Gemini đang nói mà chạm vào quả cầu -> Ngắt lời Gemini ngay lập tức
         if state == .geminiSpeaking {
             interruptPlayback()
             state = .listeningUser
@@ -240,13 +240,11 @@ final class GeminiLiveService: NSObject {
 
         guard let serverContent = json["serverContent"] as? [String: Any] else { return }
 
-        // Kiểm tra nếu người dùng ngắt lời ở chế độ Auto
         if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
             interruptPlayback()
             state = isMuted ? .muted : .listeningUser
         }
 
-        // Phụ đề giọng nói của bạn
         if let inputTranscription = serverContent["inputTranscription"] as? [String: Any],
            let text = inputTranscription["text"] as? String, !text.isEmpty {
             currentUserTranscript += text
@@ -256,7 +254,6 @@ final class GeminiLiveService: NSObject {
             }
         }
 
-        // Phụ đề câu trả lời của Gemini
         if let outputTranscription = serverContent["outputTranscription"] as? [String: Any],
            let text = outputTranscription["text"] as? String, !text.isEmpty {
             currentGeminiTranscript += text
@@ -266,7 +263,6 @@ final class GeminiLiveService: NSObject {
             }
         }
 
-        // Dữ liệu âm thanh PCM 24kHz từ Gemini
         if let modelTurn = serverContent["modelTurn"] as? [String: Any],
            let parts = modelTurn["parts"] as? [[String: Any]] {
             for part in parts {
@@ -306,7 +302,6 @@ final class GeminiLiveService: NSObject {
             let inputNode = audioEngine.inputNode
             let hwFormat = inputNode.outputFormat(forBus: 0)
 
-            // Định dạng chuẩn Gemini yêu cầu: PCM 16-bit, 16kHz, Mono
             guard let targetFormat = AVAudioFormat(
                 commonFormat: .pcmFormatInt16,
                 sampleRate: 16000,
@@ -316,11 +311,6 @@ final class GeminiLiveService: NSObject {
                 delegate?.didEncounterError("Không thể khởi tạo bộ chuyển đổi âm thanh 16kHz.")
                 return
             }
-
-            if !audioEngine.attachedNodes.contains(playerNode) {
-                audioEngine.attach(playerNode)
-            }
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
 
             inputNode.removeTap(onBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
@@ -348,7 +338,6 @@ final class GeminiLiveService: NSObject {
         converter: AVAudioConverter,
         targetFormat: AVAudioFormat
     ) {
-        // Tính cường độ âm thanh (Decibel) cho hiệu ứng Quả cầu khi người dùng đang nói
         if state == .listeningUser, let channelData = buffer.floatChannelData?[0] {
             let frameLength = Int(buffer.frameLength)
             var sum: Float = 0
@@ -362,7 +351,6 @@ final class GeminiLiveService: NSObject {
 
         guard isSetupComplete, !isMuted, state != .waitingResponse else { return }
 
-        // Ở chế độ Thủ công (Tap-to-Finish), không thu tiếng của loa khi Gemini đang nói
         if isManualTurnMode && state == .geminiSpeaking { return }
 
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
@@ -388,7 +376,6 @@ final class GeminiLiveService: NSObject {
         let byteCount = Int(pcm16Buffer.frameLength) * MemoryLayout<Int16>.size
         let pcmData = Data(bytes: int16Ptr, count: byteCount)
 
-        // Nếu đang ở chế độ Thủ công và bắt đầu lượt nói mới -> bắn tín hiệu activityStart
         if isManualTurnMode && !isManualTurnActive {
             isManualTurnActive = true
             let startPayload: [String: Any] = [
