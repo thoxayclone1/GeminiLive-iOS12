@@ -399,32 +399,54 @@ final class LiveViewController: UIViewController {
 
     @objc private func openSettings() {
         let alert = UIAlertController(
-            title: "Cài đặt Gemini Live",
-            message: "Nhập API Key từ Google AI Studio và tùy chỉnh giọng đọc (Puck, Charon, Kore, Fenrir, Aoede).",
+            title: "Cài đặt Gemini Live (v1beta)",
+            message: "Hỗ trợ khóa API định dạng AQ. & AIzaSy, tùy chỉnh Model, Giọng đọc và System Prompt.",
             preferredStyle: .alert
         )
+        // Ô 1: API Key (AQ. hoặc AIzaSy)
         alert.addTextField { tf in
-            tf.placeholder = "Gemini API Key (AIzaSy...)"
+            tf.placeholder = "API Key (AQ... hoặc AIzaSy...)"
             tf.text = self.liveService.apiKey
-            tf.isSecureTextEntry = true
+            tf.clearButtonMode = .whileEditing
+            tf.autocorrectionType = .no
+            tf.autocapitalizationType = .none
         }
+        // Ô 2: Tùy chỉnh Model (Mặc định: models/gemini-2.0-flash-exp)
         alert.addTextField { tf in
-            tf.placeholder = "Tên giọng (Aoede / Puck / Kore)"
-            tf.text = self.liveService.voiceName
+            tf.placeholder = "Model (models/gemini-2.0-flash-exp)"
+            tf.text = self.liveService.modelName
+            tf.clearButtonMode = .whileEditing
+            tf.autocorrectionType = .no
+            tf.autocapitalizationType = .none
         }
+        // Ô 3: Tùy chỉnh Giọng đọc
+        alert.addTextField { tf in
+            tf.placeholder = "Giọng đọc (Aoede / Puck / Kore / Charon / Fenrir)"
+            tf.text = self.liveService.voiceName
+            tf.clearButtonMode = .whileEditing
+            tf.autocorrectionType = .no
+        }
+        // Ô 4: Tùy chỉnh System Prompt
         alert.addTextField { tf in
             tf.placeholder = "System Prompt"
             tf.text = self.liveService.systemPrompt
+            tf.clearButtonMode = .whileEditing
         }
 
         alert.addAction(UIAlertAction(title: "Hủy", style: .cancel))
         alert.addAction(UIAlertAction(title: "Lưu & Kết nối", style: .default) { [weak self] _ in
             guard let self = self else { return }
             self.liveService.apiKey = alert.textFields?[0].text ?? ""
-            let voice = alert.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            let model = alert.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            self.liveService.modelName = model.isEmpty ? "models/gemini-2.0-flash-exp" : model
+
+            let voice = alert.textFields?[2].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !voice.isEmpty { self.liveService.voiceName = voice }
-            let prompt = alert.textFields?[2].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            let prompt = alert.textFields?[3].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !prompt.isEmpty { self.liveService.systemPrompt = prompt }
+
             self.liveService.connect()
         })
         present(alert, animated: true)
