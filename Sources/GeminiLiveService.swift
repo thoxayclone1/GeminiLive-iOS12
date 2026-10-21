@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import QuartzCore
 import Starscream
 
 enum LiveState {
@@ -42,7 +43,6 @@ final class GeminiLiveService: NSObject {
                 "models/gemini-live-2.5-flash-preview",
                 "models/gemini-3.1-flash-live-preview"
             ]
-            // Tự động dọn dẹp nếu máy đang lưu model đã khai tử hoặc dính đường dẫn Vertex projects/...
             if retiredModels.contains(saved) || saved.contains("projects/") || saved.contains("publishers/") {
                 return defaultModel
             }
@@ -71,7 +71,7 @@ final class GeminiLiveService: NSObject {
         set { UserDefaults.standard.set(newValue, forKey: "gemini_sys_prompt") }
     }
 
-    var isManualTurnMode: Bool = true
+    var isManualTurnMode: Bool = false // Mặc định bật Tự động (VAD) để đàm thoại tự nhiên ngay khi kết nối
     private(set) var isMuted: Bool = false
     private(set) var state: LiveState = .disconnected {
         didSet {
@@ -97,7 +97,9 @@ final class GeminiLiveService: NSObject {
 
     private var isSetupComplete = false
     private var isManualTurnActive = false
+    private var isServerTurnComplete = true
     private var scheduledBuffersCount = 0
+    private var speechEndCooldownUntil: TimeInterval = 0
     private var currentUserTranscript = ""
     private var currentGeminiTranscript = ""
 
@@ -120,7 +122,6 @@ final class GeminiLiveService: NSObject {
             return
         }
 
-        // Cả khóa AQ. và AIzaSy đều chạy qua cổng Google AI Studio v1beta miễn phí 100%
         openWebSocketConnection(withKey: trimmedKey)
     }
 
@@ -134,6 +135,8 @@ final class GeminiLiveService: NSObject {
         state = .connecting
         isSetupComplete = false
         isManualTurnActive = false
+        isServerTurnComplete = true
+        scheduledBuffersCount = 0
 
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
         let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
@@ -146,7 +149,6 @@ final class GeminiLiveService: NSObject {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        // TUYỆT ĐỐI KHÔNG gửi Authorization: Bearer để tránh lỗi 401 ACCESS_TOKEN_TYPE_UNSUPPORTED
         request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
 
         let ws = WebSocket(request: request)
@@ -188,12 +190,20 @@ final class GeminiLiveService: NSObject {
         stopAudioEngine()
         isSetupComplete = false
         isManualTurnActive = false
+        isServerTurnComplete = true
+        scheduledBuffersCount = 0
         state = .disconnected
     }
 
     func toggleMute() {
         isMuted.toggle()
         if isMuted {
+            if isManualTurnMode && isManualTurnActive {
+                sendJSON(["realtimeInput": ["activityEnd": [:]]])
+                isManualTurnActive = false
+            } else if !isManualTurnMode && isSetupComplete {
+                sendJSON(["realtimeInput": ["audioStreamEnd": true]])
+            }
             state = .muted
         } else if isSetupComplete {
             state = .listeningUser
@@ -210,18 +220,20 @@ final class GeminiLiveService: NSObject {
     func finishUserTurnManually() {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
 
+        // Nếu Gemini đang nói, chạm quả cầu sẽ ngắt lời ngay lập tức để người dùng nói
         if state == .geminiSpeaking {
             interruptPlayback()
-            state = .listeningUser
+            state = isMuted ? .muted : .listeningUser
             return
         }
 
         guard isManualTurnMode else { return }
 
         if isManualTurnActive {
+            // Chuẩn v1beta: Dùng activityEnd thay vì clientContent.turnComplete rỗng
             let payload: [String: Any] = [
-                "clientContent": [
-                    "turnComplete": true
+                "realtimeInput": [
+                    "activityEnd": [:]
                 ]
             ]
             sendJSON(payload)
@@ -232,14 +244,16 @@ final class GeminiLiveService: NSObject {
 
     func sendVideoFrame(jpegData: Data) {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
+        // Không gửi frame khi đang đợi hoặc khi đã tắt mic ở chế độ thủ công
+        if state == .waitingResponse { return }
+
         let base64Image = jpegData.base64EncodedString()
+        // Chuẩn v1beta: Dùng trường "video" thay vì "mediaChunks"
         let payload: [String: Any] = [
             "realtimeInput": [
-                "mediaChunks": [
-                    [
-                        "mimeType": "image/jpeg",
-                        "data": base64Image
-                    ]
+                "video": [
+                    "mimeType": "image/jpeg",
+                    "data": base64Image
                 ]
             ]
         ]
@@ -275,22 +289,28 @@ final class GeminiLiveService: NSObject {
                     ["text": systemPrompt]
                 ]
             ],
-            "outputAudioTranscription": [
-                "mode": "VERBATIM"
-            ],
-            "inputAudioTranscription": [
-                "mode": "VERBATIM"
-            ]
+            "outputAudioTranscription": [:],
+            "inputAudioTranscription": [:]
         ]
 
-        if !isManualTurnMode {
+        if isManualTurnMode {
+            // Tắt hẳn VAD phía server khi dùng chế độ Thủ công (quản lý bằng activityStart / activityEnd)
+            setupContent["realtimeInputConfig"] = [
+                "automaticActivityDetection": [
+                    "disabled": true
+                ],
+                "activityHandling": "NO_INTERRUPTION",
+                "turnCoverage": "TURN_INCLUDES_ALL_INPUT"
+            ]
+        } else {
+            // Cấu hình VAD độ nhạy cân bằng để tránh bắt nhầm tạp âm hoặc tiếng vọng loa
             setupContent["realtimeInputConfig"] = [
                 "automaticActivityDetection": [
                     "disabled": false,
-                    "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+                    "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
                     "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
-                    "prefixPaddingMs": 20,
-                    "silenceDurationMs": 400
+                    "prefixPaddingMs": 120,
+                    "silenceDurationMs": 700
                 ],
                 "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 "turnCoverage": "TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO"
@@ -314,34 +334,40 @@ final class GeminiLiveService: NSObject {
         }
 
         if json["setupComplete"] != nil {
-            isSetupComplete = true
-            startAudioEngine()
-            state = isMuted ? .muted : .listeningUser
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isSetupComplete = true
+                self.startAudioEngine()
+                self.state = self.isMuted ? .muted : .listeningUser
+            }
             return
         }
 
         guard let serverContent = json["serverContent"] as? [String: Any] else { return }
 
         if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
-            interruptPlayback()
-            state = isMuted ? .muted : .listeningUser
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.interruptPlayback()
+                self.state = self.isMuted ? .muted : .listeningUser
+            }
         }
 
         if let inputTranscription = serverContent["inputTranscription"] as? [String: Any],
            let text = inputTranscription["text"] as? String, !text.isEmpty {
             currentUserTranscript += text
+            let transcript = currentUserTranscript
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.didUpdateTranscript(userText: self.currentUserTranscript, geminiText: nil)
+                self?.delegate?.didUpdateTranscript(userText: transcript, geminiText: nil)
             }
         }
 
         if let outputTranscription = serverContent["outputTranscription"] as? [String: Any],
            let text = outputTranscription["text"] as? String, !text.isEmpty {
             currentGeminiTranscript += text
+            let transcript = currentGeminiTranscript
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.didUpdateTranscript(userText: nil, geminiText: self.currentGeminiTranscript)
+                self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript)
             }
         }
 
@@ -350,9 +376,9 @@ final class GeminiLiveService: NSObject {
             for part in parts {
                 if let textPart = part["text"] as? String, !textPart.isEmpty {
                     currentGeminiTranscript += textPart
+                    let transcript = currentGeminiTranscript
                     DispatchQueue.main.async { [weak self] in
-                        guard let self = self else { return }
-                        self.delegate?.didUpdateTranscript(userText: nil, geminiText: self.currentGeminiTranscript)
+                        self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript)
                     }
                 }
 
@@ -369,8 +395,13 @@ final class GeminiLiveService: NSObject {
         if let turnComplete = serverContent["turnComplete"] as? Bool, turnComplete {
             currentUserTranscript = ""
             currentGeminiTranscript = ""
-            if scheduledBuffersCount == 0 && state != .muted {
-                state = .listeningUser
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isServerTurnComplete = true
+                if self.scheduledBuffersCount == 0 && self.state != .muted {
+                    self.speechEndCooldownUntil = CACurrentMediaTime() + 0.4
+                    self.state = .listeningUser
+                }
             }
         }
     }
@@ -378,14 +409,18 @@ final class GeminiLiveService: NSObject {
     private func startAudioEngine() {
         do {
             let session = AVAudioSession.sharedInstance()
+            // Bỏ .mixWithOthers để bộ khử tiếng vọng phần cứng (AEC) của mode .voiceChat hoạt động tối đa
             try session.setCategory(
                 .playAndRecord,
                 mode: .voiceChat,
-                options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers]
+                options: [.defaultToSpeaker, .allowBluetooth]
             )
+            try session.setPreferredSampleRate(16000)
             try session.setActive(true, options: .notifyOthersOnDeactivation)
 
             if audioEngine.isRunning {
+                audioEngine.inputNode.removeTap(onBus: 0)
+                playerNode.stop()
                 audioEngine.stop()
             }
             audioEngine.reset()
@@ -404,7 +439,10 @@ final class GeminiLiveService: NSObject {
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
 
             let inputNode = audioEngine.inputNode
-            let hwFormat = inputNode.outputFormat(forBus: 0)
+            let inputFormat = inputNode.inputFormat(forBus: 0)
+            let hwFormat = (inputFormat.sampleRate > 0 && inputFormat.channelCount > 0)
+                ? inputFormat
+                : inputNode.outputFormat(forBus: 0)
 
             guard let targetFormat = AVAudioFormat(
                 commonFormat: .pcmFormatInt16,
@@ -417,7 +455,7 @@ final class GeminiLiveService: NSObject {
             }
 
             inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { [weak self] buffer, _ in
                 self?.processMicrophoneBuffer(buffer, converter: converter, targetFormat: targetFormat)
             }
 
@@ -442,7 +480,16 @@ final class GeminiLiveService: NSObject {
         converter: AVAudioConverter,
         targetFormat: AVAudioFormat
     ) {
-        if state == .listeningUser, let channelData = buffer.floatChannelData?[0] {
+        // Chặn thu âm khi đang tắt mic, đang chờ phản hồi, khi Gemini đang nói, hoặc trong 0.4s vừa dứt tiếng loa
+        guard isSetupComplete,
+              !isMuted,
+              state != .waitingResponse,
+              state != .geminiSpeaking,
+              CACurrentMediaTime() >= speechEndCooldownUntil else {
+            return
+        }
+
+        if let channelData = buffer.floatChannelData?[0] {
             let frameLength = Int(buffer.frameLength)
             var sum: Float = 0
             for i in 0..<frameLength {
@@ -453,14 +500,11 @@ final class GeminiLiveService: NSObject {
             delegate?.didUpdateAudioLevel(normalized)
         }
 
-        guard isSetupComplete, !isMuted, state != .waitingResponse else { return }
-
-        if isManualTurnMode && state == .geminiSpeaking { return }
-
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let capacity = UInt32(Double(buffer.frameLength) * ratio) + 32
         guard let pcm16Buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
 
+        converter.reset()
         var error: NSError?
         var hasProvidedData = false
         let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
@@ -480,17 +524,23 @@ final class GeminiLiveService: NSObject {
         let byteCount = Int(pcm16Buffer.frameLength) * MemoryLayout<Int16>.size
         let pcmData = Data(bytes: int16Ptr, count: byteCount)
 
+        // Nếu ở chế độ Thủ công, gửi tín hiệu activityStart ngay trước gói âm thanh đầu tiên của lượt nói
         if isManualTurnMode && !isManualTurnActive {
             isManualTurnActive = true
+            let startPayload: [String: Any] = [
+                "realtimeInput": [
+                    "activityStart": [:]
+                ]
+            ]
+            sendJSON(startPayload)
         }
 
+        // Chuẩn v1beta: Gửi qua trường "audio" thay vì "mediaChunks"
         let audioPayload: [String: Any] = [
             "realtimeInput": [
-                "mediaChunks": [
-                    [
-                        "mimeType": "audio/pcm;rate=16000",
-                        "data": pcmData.base64EncodedString()
-                    ]
+                "audio": [
+                    "mimeType": "audio/pcm;rate=16000",
+                    "data": pcmData.base64EncodedString()
                 ]
             ]
         ]
@@ -522,30 +572,40 @@ final class GeminiLiveService: NSObject {
         let level = min(max(CGFloat(rms * 5.0), 0.05), 1.0)
         delegate?.didUpdateAudioLevel(level)
 
-        if state != .geminiSpeaking {
-            state = .geminiSpeaking
-        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isServerTurnComplete = false
+            if self.state != .geminiSpeaking {
+                self.state = .geminiSpeaking
+            }
+            self.scheduledBuffersCount += 1
 
-        scheduledBuffersCount += 1
-        playerNode.scheduleBuffer(pcmFloatBuffer) { [weak self] in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.scheduledBuffersCount = max(0, self.scheduledBuffersCount - 1)
-                if self.scheduledBuffersCount == 0 && self.state == .geminiSpeaking {
-                    self.state = self.isMuted ? .muted : .listeningUser
+            self.playerNode.scheduleBuffer(pcmFloatBuffer) { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.scheduledBuffersCount = max(0, self.scheduledBuffersCount - 1)
+                    // Chỉ mở lại Mic sau khi Server đã báo turnComplete VÀ toàn bộ buffer âm thanh đã phát xong
+                    if self.scheduledBuffersCount == 0 && self.isServerTurnComplete && self.state == .geminiSpeaking {
+                        self.speechEndCooldownUntil = CACurrentMediaTime() + 0.4
+                        self.state = self.isMuted ? .muted : .listeningUser
+                    }
                 }
             }
-        }
 
-        if !playerNode.isPlaying {
-            playerNode.play()
+            if !self.playerNode.isPlaying && self.audioEngine.isRunning {
+                self.playerNode.play()
+            }
         }
     }
 
     private func interruptPlayback() {
         playerNode.stop()
-        playerNode.play()
+        if audioEngine.isRunning {
+            playerNode.play()
+        }
         scheduledBuffersCount = 0
+        isServerTurnComplete = true
+        speechEndCooldownUntil = CACurrentMediaTime() + 0.2
     }
 
     private func sendJSON(_ dictionary: [String: Any]) {
