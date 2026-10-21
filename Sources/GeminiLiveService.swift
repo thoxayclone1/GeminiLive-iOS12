@@ -21,15 +21,8 @@ protocol GeminiLiveServiceDelegate: AnyObject {
 final class GeminiLiveService: NSObject {
     weak var delegate: GeminiLiveServiceDelegate?
 
-    private enum ConnectionRoute: Int {
-        case v1BetaStandard = 0
-        case v1BetaEnhanced = 1
-        case vertexExpressAQ = 2
-    }
-
-    // 1. Đặt model mặc định mới và tự động nâng cấp nếu máy đang lưu model cũ đã bị khai tử
-    private let defaultStudioModel = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-    private let defaultVertexModel = "gemini-live-2.5-flash-native-audio"
+    // Model mặc định thế hệ mới nhất theo chuẩn AI Studio Live API
+    private let defaultModel = "models/gemini-3.8-live"
 
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: "gemini_api_key") ?? "" }
@@ -38,7 +31,7 @@ final class GeminiLiveService: NSObject {
 
     var modelName: String {
         get {
-            let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? defaultStudioModel
+            let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? defaultModel
             let retiredModels: Set<String> = [
                 "",
                 "gemini-2.0-flash-exp",
@@ -46,21 +39,27 @@ final class GeminiLiveService: NSObject {
                 "gemini-2.0-flash-live-001",
                 "models/gemini-2.0-flash-live-001",
                 "gemini-live-2.5-flash-preview",
-                "models/gemini-live-2.5-flash-preview"
+                "models/gemini-live-2.5-flash-preview",
+                "models/gemini-3.1-flash-live-preview"
             ]
-            if retiredModels.contains(saved) {
-                return defaultStudioModel
+            // Tự động dọn dẹp nếu máy đang lưu model đã khai tử hoặc dính đường dẫn Vertex projects/...
+            if retiredModels.contains(saved) || saved.contains("projects/") || saved.contains("publishers/") {
+                return defaultModel
             }
             return saved
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            UserDefaults.standard.set(trimmed.isEmpty ? defaultStudioModel : trimmed, forKey: "gemini_model")
+            if trimmed.isEmpty || trimmed.contains("projects/") || trimmed.contains("publishers/") {
+                UserDefaults.standard.set(defaultModel, forKey: "gemini_model")
+            } else {
+                UserDefaults.standard.set(trimmed, forKey: "gemini_model")
+            }
         }
     }
 
     var voiceName: String {
-        get { UserDefaults.standard.string(forKey: "gemini_voice") ?? "Aoede" }
+        get { UserDefaults.standard.string(forKey: "gemini_voice") ?? "Puck" }
         set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_voice") }
     }
 
@@ -84,7 +83,6 @@ final class GeminiLiveService: NSObject {
     }
 
     private var socket: WebSocket?
-    private var activeRoute: ConnectionRoute = .v1BetaStandard
     private var isUserInitiatedDisconnect = false
 
     private let audioEngine = AVAudioEngine()
@@ -106,8 +104,8 @@ final class GeminiLiveService: NSObject {
     override init() {
         super.init()
         let saved = UserDefaults.standard.string(forKey: "gemini_model") ?? ""
-        if saved.contains("gemini-2.0-flash") || saved == "models/gemini-live-2.5-flash-preview" {
-            UserDefaults.standard.set(defaultStudioModel, forKey: "gemini_model")
+        if saved.contains("projects/") || saved.contains("gemini-2.0") {
+            UserDefaults.standard.set(defaultModel, forKey: "gemini_model")
         }
         audioEngine.attach(playerNode)
         isPlayerNodeAttached = true
@@ -122,19 +120,11 @@ final class GeminiLiveService: NSObject {
             return
         }
 
-        // Nếu là khóa Vertex Express (AQ.), kết nối thẳng vào cổng Vertex AI
-        activeRoute = trimmedKey.hasPrefix("AQ.") ? .vertexExpressAQ : .v1BetaEnhanced
-        openWebSocketConnection(withKey: trimmedKey, route: activeRoute)
+        // Cả khóa AQ. và AIzaSy đều chạy qua cổng Google AI Studio v1beta miễn phí 100%
+        openWebSocketConnection(withKey: trimmedKey)
     }
 
-    private func openWebSocketConnection(withKey key: String, route: ConnectionRoute) {
-        // Kiểm tra nếu dùng khóa AQ. (Express Mode) mà không có đường dẫn projects/...
-        if route == .vertexExpressAQ && !modelName.contains("projects/") {
-            delegate?.didEncounterError("Khóa AQ. (Vertex Express) không hỗ trợ Live API. Vui lòng dùng khóa AIzaSy... từ Google AI Studio.")
-            state = .disconnected
-            return
-        }
-
+    private func openWebSocketConnection(withKey key: String) {
         isUserInitiatedDisconnect = true
         socket?.disconnect()
         socket = nil
@@ -146,15 +136,7 @@ final class GeminiLiveService: NSObject {
         isManualTurnActive = false
 
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-        let urlString: String
-
-        switch route {
-        case .v1BetaStandard, .v1BetaEnhanced:
-            urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
-        case .vertexExpressAQ:
-            let location = extractLocation(from: modelName) ?? "us-central1"
-            urlString = "wss://\(location)-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?key=\(encodedKey)"
-        }
+        let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
 
         guard let url = URL(string: urlString) else {
             delegate?.didEncounterError("URL kết nối không hợp lệ.")
@@ -164,11 +146,12 @@ final class GeminiLiveService: NSObject {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
+        // TUYỆT ĐỐI KHÔNG gửi Authorization: Bearer để tránh lỗi 401 ACCESS_TOKEN_TYPE_UNSUPPORTED
         request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
 
         let ws = WebSocket(request: request)
         ws.onConnect = { [weak self] in
-            self?.sendInitialSetup(for: route)
+            self?.sendInitialSetup()
         }
         ws.onDisconnect = { [weak self] error in
             guard let self = self else { return }
@@ -177,12 +160,6 @@ final class GeminiLiveService: NSObject {
             if self.isUserInitiatedDisconnect {
                 self.state = .disconnected
                 return
-            }
-
-            if !self.isSetupComplete {
-                if self.tryNextFallbackRoute(withKey: key) {
-                    return
-                }
             }
 
             self.state = .disconnected
@@ -202,28 +179,6 @@ final class GeminiLiveService: NSObject {
         }
         self.socket = ws
         ws.connect()
-    }
-
-    private func extractLocation(from path: String) -> String? {
-        let components = path.split(separator: "/").map(String.init)
-        if let locIndex = components.firstIndex(of: "locations"), locIndex + 1 < components.count {
-            return components[locIndex + 1]
-        }
-        return nil
-    }
-
-    private func tryNextFallbackRoute(withKey key: String) -> Bool {
-        if key.hasPrefix("AQ.") {
-            return false // Khóa AQ. chỉ dùng trên endpoint Vertex AI
-        }
-        switch activeRoute {
-        case .v1BetaEnhanced:
-            activeRoute = .v1BetaStandard
-            openWebSocketConnection(withKey: key, route: .v1BetaStandard)
-            return true
-        case .v1BetaStandard, .vertexExpressAQ:
-            return false
-        }
     }
 
     func disconnect() {
@@ -264,21 +219,12 @@ final class GeminiLiveService: NSObject {
         guard isManualTurnMode else { return }
 
         if isManualTurnActive {
-            if activeRoute == .v1BetaEnhanced {
-                let payload: [String: Any] = [
-                    "realtimeInput": [
-                        "activityEnd": [String: Any]()
-                    ]
+            let payload: [String: Any] = [
+                "clientContent": [
+                    "turnComplete": true
                 ]
-                sendJSON(payload)
-            } else {
-                let payload: [String: Any] = [
-                    "clientContent": [
-                        "turnComplete": true
-                    ]
-                ]
-                sendJSON(payload)
-            }
+            ]
+            sendJSON(payload)
             isManualTurnActive = false
             state = .waitingResponse
         }
@@ -300,33 +246,17 @@ final class GeminiLiveService: NSObject {
         sendJSON(payload)
     }
 
-    private func resolvedModelPath(for route: ConnectionRoute) -> String {
+    private func resolvedModelPath() -> String {
         let raw = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Giữ nguyên nếu người dùng đã nhập đầy đủ đường dẫn dự án Vertex AI
-        if raw.hasPrefix("projects/") {
+        if raw.hasPrefix("models/") {
             return raw
         }
-
-        let cleanName: String
-        if raw.hasPrefix("publishers/google/models/") {
-            cleanName = String(raw.dropFirst("publishers/google/models/".count))
-        } else if raw.hasPrefix("models/") {
-            cleanName = String(raw.dropFirst("models/".count))
-        } else {
-            cleanName = raw.isEmpty ? "gemini-2.5-flash-native-audio-preview-12-2025" : raw
-        }
-
-        switch route {
-        case .v1BetaStandard, .v1BetaEnhanced:
-            return "models/\(cleanName)"
-        case .vertexExpressAQ:
-            return "publishers/google/models/\(cleanName)"
-        }
+        let cleanName = raw.isEmpty ? "gemini-3.8-live" : raw
+        return "models/\(cleanName)"
     }
 
-    private func sendInitialSetup(for route: ConnectionRoute) {
-        let formattedModel = resolvedModelPath(for: route)
+    private func sendInitialSetup() {
+        let formattedModel = resolvedModelPath()
 
         var setupContent: [String: Any] = [
             "model": formattedModel,
@@ -344,17 +274,27 @@ final class GeminiLiveService: NSObject {
                 "parts": [
                     ["text": systemPrompt]
                 ]
+            ],
+            "outputAudioTranscription": [
+                "mode": "VERBATIM"
+            ],
+            "inputAudioTranscription": [
+                "mode": "VERBATIM"
             ]
         ]
 
-        if route == .v1BetaEnhanced {
+        if !isManualTurnMode {
             setupContent["realtimeInputConfig"] = [
                 "automaticActivityDetection": [
-                    "disabled": isManualTurnMode
-                ]
+                    "disabled": false,
+                    "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+                    "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                    "prefixPaddingMs": 20,
+                    "silenceDurationMs": 400
+                ],
+                "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
+                "turnCoverage": "TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO"
             ]
-            setupContent["inputAudioTranscription"] = [String: Any]()
-            setupContent["outputAudioTranscription"] = [String: Any]()
         }
 
         let setupDict: [String: Any] = ["setup": setupContent]
@@ -440,8 +380,8 @@ final class GeminiLiveService: NSObject {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(
                 .playAndRecord,
-                mode: .default,
-                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers]
             )
             try session.setActive(true, options: .notifyOthersOnDeactivation)
 
@@ -542,14 +482,6 @@ final class GeminiLiveService: NSObject {
 
         if isManualTurnMode && !isManualTurnActive {
             isManualTurnActive = true
-            if activeRoute == .v1BetaEnhanced {
-                let startPayload: [String: Any] = [
-                    "realtimeInput": [
-                        "activityStart": [String: Any]()
-                    ]
-                ]
-                sendJSON(startPayload)
-            }
         }
 
         let audioPayload: [String: Any] = [
