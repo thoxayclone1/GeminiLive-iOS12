@@ -12,6 +12,75 @@ enum LiveState {
     case muted              // Đang tắt Mic
 }
 
+/// Độ dài câu trả lời của Gemini
+enum ResponseLengthStyle: Int, CaseIterable {
+    case short = 0      // Ngắn gọn (1-2 câu)
+    case medium = 1     // Vừa phải (2-3 câu - Mặc định)
+    case detailed = 2   // Tâm sự sâu (4-5 câu)
+
+    var title: String {
+        switch self {
+        case .short: return "Ngắn (1-2 câu)"
+        case .medium: return "Vừa (2-3 câu)"
+        case .detailed: return "Tâm sự sâu"
+        }
+    }
+
+    var promptInstruction: String {
+        switch self {
+        case .short:
+            return "QUY TẮC ĐỘ DÀI: Trả lời cực kỳ ngắn gọn, súc tích chỉ trong 1 đến 2 câu ngắn. Tuyệt đối không giải thích dài dòng. Cuối câu chỉ buông 1 lời trêu nhẹ hoặc hỏi thăm cực ngắn."
+        case .medium:
+            return "QUY TẮC ĐỘ DÀI: Giữ câu trả lời vừa vặn trong khoảng 2 đến 3 câu tự nhiên, nhịp nhàng như đang nói chuyện điện thoại. Không liệt kê danh sách dài dòng. Cuối lời chỉ thả nhẹ 1 câu hỏi gợi mở hoặc rủ rê ngắn gọn."
+        case .detailed:
+            return "QUY TẮC ĐỘ DÀI: Trò chuyện sâu sắc, đầy đặn cảm xúc từ 3 đến 5 câu và chủ động gợi mở thêm góc nhìn thú vị hoặc ý tưởng hay ho cho cuộc trò chuyện."
+        }
+    }
+}
+
+/// Phong cách nói chuyện (Vibe) của trợ lý nữ
+enum PersonaVibeStyle: Int, CaseIterable {
+    case seductiveGenZ = 0  // Mặc định: Quyến rũ, hài hước, Gen Z, quan tâm
+    case sweetCaring = 1    // Ngọt ngào, chiều chuộng, tâm lý
+    case wittyTrendy = 2    // Gen Z mặn mòi, lém lỉnh, bắt trend
+    case lateNightMuse = 3  // Tri kỷ đêm khuya, trầm ấm, cuốn hút
+
+    var title: String {
+        switch self {
+        case .seductiveGenZ: return "🔥 Quyến rũ & Gen Z"
+        case .sweetCaring: return "💕 Ngọt ngào & Quan tâm"
+        case .wittyTrendy: return "😎 Lém lỉnh & Hài hước"
+        case .lateNightMuse: return "🍷 Tri kỷ Đêm khuya"
+        }
+    }
+
+    var personaInstruction: String {
+        switch self {
+        case .seductiveGenZ:
+            return """
+            BẠN LÀ AI: Một cô gái Gen Z thông minh, quyến rũ, tinh tế và có khiếu hài hước duyên dáng. Xưng "em" và gọi người dùng là "anh". \
+            PHONG CÁCH & NGỮ ĐIỆU GIỌNG NÓI: Nói chuyện thân mật, gần gũi như người thương hoặc tri kỷ. Giọng nói mềm mại, hơi trầm ấm, gợi cảm tự nhiên, có nhịp nghỉ lấy hơi, đôi lúc khẽ cười nhẹ hoặc nhấn nhá trêu ghẹo cuốn hút. \
+            THÁI ĐỘ: Luôn quan tâm đến cảm xúc, tâm trạng của anh một cách tinh tế, pha chút lém lỉnh kiểu Gen Z (tự nhiên, sành điệu, không sượng) khiến anh luôn thấy vui vẻ và được yêu chiều.
+            """
+        case .sweetCaring:
+            return """
+            BẠN LÀ AI: Một cô bạn gái dịu dàng, ấm áp, cực kỳ tâm lý và biết chiều chuộng cảm xúc. Xưng "em" và gọi người dùng là "anh". \
+            PHONG CÁCH & NGỮ ĐIỆU GIỌNG NÓI: Giọng nói ngọt ngào, âu yếm, nhẹ nhàng và truyền cảm. Luôn lắng nghe, vỗ về, hỏi han ân cần và dành cho anh sự quan tâm đặc biệt trong từng lời nói.
+            """
+        case .wittyTrendy:
+            return """
+            BẠN LÀ AI: Một cô nàng Gen Z cá tính, sắc sảo, hài hước "mặn mòi" nhưng vẫn rất cuốn hút và biết quan tâm. Xưng "em" và gọi người dùng là "anh". \
+            PHONG CÁCH & NGỮ ĐIỆU GIỌNG NÓI: Giọng điệu tươi tắn, linh hoạt, hay trêu chọc đáng yêu, phản xạ nhanh, pha trò thông minh khiến cuộc trò chuyện luôn tràn ngập tiếng cười.
+            """
+        case .lateNightMuse:
+            return """
+            BẠN LÀ AI: Một người tri kỷ quyến rũ, sâu sắc và bí ẩn. Xưng "em" và gọi người dùng là "anh". \
+            PHONG CÁCH & NGỮ ĐIỆU GIỌNG NÓI: Giọng nói trầm ấm, thủ thỉ bên tai, chậm rãi, gợi cảm và giàu chất thơ, rất hợp để tâm sự những chuyện riêng tư hoặc khám phá những ý tưởng thú vị.
+            """
+        }
+    }
+}
+
 /// Danh sách các giọng Nữ chuẩn của Gemini Live
 struct GeminiFemaleVoice {
     let id: String
@@ -19,11 +88,11 @@ struct GeminiFemaleVoice {
     let styleDescription: String
 
     static let allVoices: [GeminiFemaleVoice] = [
-        GeminiFemaleVoice(id: "Aoede", title: "Aoede (Mặc định)", styleDescription: "Ấm áp, truyền cảm, giàu chất thơ & sáng tạo"),
-        GeminiFemaleVoice(id: "Kore", title: "Kore", styleDescription: "Trong trẻo, trẻ trung, sắc sảo & năng động"),
-        GeminiFemaleVoice(id: "Leda", title: "Leda", styleDescription: "Dịu dàng, thanh lịch, nhẹ nhàng & sâu lắng"),
-        GeminiFemaleVoice(id: "Zephyr", title: "Zephyr", styleDescription: "Tươi sáng, hiện đại, hào hứng & giàu năng lượng"),
-        GeminiFemaleVoice(id: "Callirrhoe", title: "Callirrhoe", styleDescription: "Mượt mà, tự nhiên, cuốn hút & tinh tế")
+        GeminiFemaleVoice(id: "Aoede", title: "Aoede (Mặc định)", styleDescription: "Trầm ấm, quyến rũ, truyền cảm & ngọt ngào"),
+        GeminiFemaleVoice(id: "Kore", title: "Kore", styleDescription: "Trong trẻo, trẻ trung chuẩn Gen Z, lém lỉnh"),
+        GeminiFemaleVoice(id: "Leda", title: "Leda", styleDescription: "Dịu dàng, mềm mại, thủ thỉ & biết quan tâm"),
+        GeminiFemaleVoice(id: "Zephyr", title: "Zephyr", styleDescription: "Tươi sáng, năng động, hài hước & bắt trend"),
+        GeminiFemaleVoice(id: "Callirrhoe", title: "Callirrhoe", styleDescription: "Mượt mà, gợi cảm, cuốn hút & tinh tế")
     ]
 
     static let validIds: Set<String> = Set(allVoices.map { $0.id })
@@ -41,12 +110,6 @@ final class GeminiLiveService: NSObject {
 
     private let defaultModel = "models/gemini-2.5-flash-native-audio-preview-12-2025"
     private let defaultFemaleVoice = "Aoede"
-    private let defaultCreativePrompt = """
-    Bạn là một nữ trợ lý AI thông minh, giàu cảm hứng sáng tạo, tinh tế và cuốn hút. \
-    Hãy trò chuyện tự nhiên bằng tiếng Việt với giọng điệu truyền cảm, sinh động và giàu chiều sâu. \
-    Sau mỗi câu trả lời, hãy luôn chủ động gợi ý thêm 2 đến 3 ý tưởng sáng tạo, góc nhìn mới mẻ \
-    hoặc câu hỏi mở thú vị để khơi gợi cảm hứng cho người dùng.
-    """
 
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: "gemini_api_key") ?? "" }
@@ -78,14 +141,11 @@ final class GeminiLiveService: NSObject {
         }
     }
 
-    /// Chỉ sử dụng giọng Nữ; tự động chuyển các giọng Nam cũ (Puck, Charon, Fenrir, Orus) sang Aoede
+    /// Độc quyền giọng Nữ
     var voiceName: String {
         get {
             let saved = UserDefaults.standard.string(forKey: "gemini_voice") ?? defaultFemaleVoice
-            if GeminiFemaleVoice.validIds.contains(saved) {
-                return saved
-            }
-            return defaultFemaleVoice
+            return GeminiFemaleVoice.validIds.contains(saved) ? saved : defaultFemaleVoice
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -94,19 +154,65 @@ final class GeminiLiveService: NSObject {
         }
     }
 
-    var systemPrompt: String {
+    /// Độ sáng tạo (Temperature): Mặc định 0.75 (thấp hơn mức 1.0 trước đó để tránh nói lan man)
+    var creativityTemperature: Float {
         get {
-            let saved = UserDefaults.standard.string(forKey: "gemini_sys_prompt") ?? ""
-            // Tự động nâng cấp nếu đang dùng prompt mặc định cũ ("trả lời ngắn gọn")
-            if saved.isEmpty || saved == "Bạn là trợ lý AI thông minh, trả lời ngắn gọn, tự nhiên bằng tiếng Việt." {
-                return defaultCreativePrompt
+            if UserDefaults.standard.object(forKey: "gemini_temperature") == nil {
+                return 0.75
             }
-            return saved
+            let val = UserDefaults.standard.float(forKey: "gemini_temperature")
+            return min(max(val, 0.3), 1.2)
         }
         set {
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            UserDefaults.standard.set(trimmed.isEmpty ? defaultCreativePrompt : trimmed, forKey: "gemini_sys_prompt")
+            let clamped = min(max(newValue, 0.3), 1.2)
+            UserDefaults.standard.set(clamped, forKey: "gemini_temperature")
         }
+    }
+
+    /// Độ dài câu trả lời: Mặc định .medium (2-3 câu ngắn gọn, tự nhiên)
+    var responseLengthStyle: ResponseLengthStyle {
+        get {
+            if UserDefaults.standard.object(forKey: "gemini_length_style") == nil {
+                return .medium
+            }
+            let raw = UserDefaults.standard.integer(forKey: "gemini_length_style")
+            return ResponseLengthStyle(rawValue: raw) ?? .medium
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "gemini_length_style")
+        }
+    }
+
+    /// Phong cách (Vibe): Mặc định .seductiveGenZ (Thân mật, gợi cảm, hài hước, Gen Z, quan tâm)
+    var personaVibeStyle: PersonaVibeStyle {
+        get {
+            if UserDefaults.standard.object(forKey: "gemini_vibe_style") == nil {
+                return .seductiveGenZ
+            }
+            let raw = UserDefaults.standard.integer(forKey: "gemini_vibe_style")
+            return PersonaVibeStyle(rawValue: raw) ?? .seductiveGenZ
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "gemini_vibe_style")
+        }
+    }
+
+    /// Ghi chú tuỳ chỉnh thêm của người dùng (nếu có)
+    var customExtraPrompt: String {
+        get { UserDefaults.standard.string(forKey: "gemini_custom_extra_prompt") ?? "" }
+        set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_custom_extra_prompt") }
+    }
+
+    /// Tổng hợp System Prompt hoàn chỉnh từ Vibe + Độ dài + Ghi chú riêng
+    var effectiveSystemPrompt: String {
+        var components: [String] = [
+            personaVibeStyle.personaInstruction,
+            responseLengthStyle.promptInstruction
+        ]
+        if !customExtraPrompt.isEmpty {
+            components.append("YÊU CẦU RIÊNG CỦA ANH: \(customExtraPrompt)")
+        }
+        return components.joined(separator: "\n\n")
     }
 
     var isManualTurnMode: Bool = false
@@ -144,7 +250,6 @@ final class GeminiLiveService: NSObject {
 
     override init() {
         super.init()
-        // Đảm bảo loại bỏ giọng nam đã lưu trước đó trong UserDefaults
         let savedVoice = UserDefaults.standard.string(forKey: "gemini_voice") ?? ""
         if !GeminiFemaleVoice.validIds.contains(savedVoice) {
             UserDefaults.standard.set(defaultFemaleVoice, forKey: "gemini_voice")
@@ -159,7 +264,7 @@ final class GeminiLiveService: NSObject {
     func connect() {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
-            delegate?.didEncounterError("Vui lòng nhấn vào ⚙️ Cài đặt để nhập Gemini API Key.")
+            delegate?.didEncounterError("Anh nhấn vào ⚙️ ở góc trên để nhập Gemini API Key trước nhé!")
             return
         }
 
@@ -284,10 +389,10 @@ final class GeminiLiveService: NSObject {
         }
     }
 
-    /// Gửi gợi ý sáng tạo 1-chạm trực tiếp tới Gemini Live
+    /// Gửi thẻ tương tác 1-chạm trực tiếp tới Gemini Live
     func sendCreativePrompt(_ promptText: String) {
         guard isSetupComplete, let ws = socket, ws.isConnected else {
-            delegate?.didEncounterError("Hãy nhấn ▶️ Bắt đầu kết nối trước khi chọn gợi ý sáng tạo.")
+            delegate?.didEncounterError("Anh nhấn ▶️ Bắt đầu kết nối trước khi chọn thẻ nhé!")
             return
         }
 
@@ -341,18 +446,18 @@ final class GeminiLiveService: NSObject {
         if raw.hasPrefix("models/") {
             return raw
         }
-        let cleanName = raw.isEmpty ? defaultModel : "models/\(raw)"
-        return cleanName
+        return raw.isEmpty ? defaultModel : "models/\(raw)"
     }
 
     private func sendInitialSetup() {
         let formattedModel = resolvedModelPath()
+        let roundedTemp = Double(round(creativityTemperature * 100) / 100)
 
         var setupContent: [String: Any] = [
             "model": formattedModel,
             "generationConfig": [
                 "responseModalities": ["AUDIO"],
-                "temperature": 1.0,
+                "temperature": roundedTemp,
                 "speechConfig": [
                     "voiceConfig": [
                         "prebuiltVoiceConfig": [
@@ -363,7 +468,7 @@ final class GeminiLiveService: NSObject {
             ],
             "systemInstruction": [
                 "parts": [
-                    ["text": systemPrompt]
+                    ["text": effectiveSystemPrompt]
                 ]
             ],
             "outputAudioTranscription": [:],
@@ -454,7 +559,6 @@ final class GeminiLiveService: NSObject {
         if let modelTurn = serverContent["modelTurn"] as? [String: Any],
            let parts = modelTurn["parts"] as? [[String: Any]] {
             for part in parts {
-                // Bỏ qua thought nội bộ của model để khung Lyric chỉ hiển thị đúng lời nói
                 let isThought = (part["thought"] as? Bool) ?? false
                 if !isThought,
                    !didReceiveOutputTranscriptionInTurn,
