@@ -411,9 +411,9 @@ final class LiveViewController: UIViewController {
             tf.autocorrectionType = .no
             tf.autocapitalizationType = .none
         }
-        // Ô 2: Tùy chỉnh Model (Mặc định: models/gemini-2.0-flash-exp)
+        // Ô 2: Tùy chỉnh Model
         alert.addTextField { tf in
-            tf.placeholder = "Model (models/gemini-2.0-flash-exp)"
+            tf.placeholder = "Model (models/gemini-2.5-flash-native-audio-preview-12-2025)"
             tf.text = self.liveService.modelName
             tf.clearButtonMode = .whileEditing
             tf.autocorrectionType = .no
@@ -439,7 +439,7 @@ final class LiveViewController: UIViewController {
             self.liveService.apiKey = alert.textFields?[0].text ?? ""
 
             let model = alert.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            self.liveService.modelName = model.isEmpty ? "models/gemini-2.0-flash-exp" : model
+            self.liveService.modelName = model.isEmpty ? "models/gemini-2.5-flash-native-audio-preview-12-2025" : model
 
             let voice = alert.textFields?[2].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !voice.isEmpty { self.liveService.voiceName = voice }
