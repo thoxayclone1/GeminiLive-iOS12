@@ -9,6 +9,7 @@ final class LiveViewController: UIViewController {
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private let videoOutput = AVCaptureVideoDataOutput()
     private let cameraQueue = DispatchQueue(label: "com.geminilive.camera")
+    private let ciContext = CIContext(options: nil)
     private var isCameraEnabled = false
     private var isUsingFrontCamera = false
     private var lastFrameSentTime: TimeInterval = 0
@@ -273,8 +274,9 @@ final class LiveViewController: UIViewController {
         pillBar.layer.borderColor = UIColor.white.withAlphaComponent(0.15).cgColor
         view.addSubview(pillBar)
 
+        let initialModeTitle = liveService.isManualTurnMode ? "✋ Thủ công" : "⚡ Tự động"
         configurePillButton(micButton, title: "🎙️ Mic", action: #selector(handleMicTap))
-        configurePillButton(modeButton, title: "✋ Thủ công", action: #selector(handleModeTap))
+        configurePillButton(modeButton, title: initialModeTitle, action: #selector(handleModeTap))
         configurePillButton(camButton, title: "📷 Cam", action: #selector(handleCamTap))
         configurePillButton(powerButton, title: "▶️ Bắt đầu", action: #selector(handlePowerTap))
         powerButton.backgroundColor = UIColor(red: 0.26, green: 0.52, blue: 0.96, alpha: 1.0)
@@ -490,6 +492,8 @@ final class LiveViewController: UIViewController {
         cameraQueue.async { [weak self] in
             guard let self = self else { return }
             self.captureSession.beginConfiguration()
+            // QUAN TRỌNG: Ngăn AVCaptureSession tự ý reset AVAudioSession làm mất tiếng Mic trên iOS 12
+            self.captureSession.automaticallyConfiguresApplicationAudioSession = false
             self.captureSession.sessionPreset = .medium
 
             for input in self.captureSession.inputs {
@@ -506,6 +510,7 @@ final class LiveViewController: UIViewController {
             self.captureSession.addInput(input)
 
             if self.captureSession.outputs.isEmpty {
+                self.videoOutput.alwaysDiscardsLateVideoFrames = true
                 self.videoOutput.setSampleBufferDelegate(self, queue: self.cameraQueue)
                 if self.captureSession.canAddOutput(self.videoOutput) {
                     self.captureSession.addOutput(self.videoOutput)
@@ -600,8 +605,7 @@ extension LiveViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext(options: nil)
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
         let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
         if let jpegData = uiImage.jpegData(compressionQuality: 0.45) {
             liveService.sendVideoFrame(jpegData: jpegData)
