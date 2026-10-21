@@ -21,14 +21,12 @@ protocol GeminiLiveServiceDelegate: AnyObject {
 final class GeminiLiveService: NSObject {
     weak var delegate: GeminiLiveServiceDelegate?
 
-    // Chế độ kết nối tự động thích ứng cho cả khóa AQ. và AIzaSy
     private enum ConnectionRoute: Int {
-        case v1BetaStandard = 0       // Cổng v1beta chuẩn (tối ưu cho gemini-2.0-flash-exp)
-        case v1BetaEnhanced = 1       // Cổng v1beta kèm cấu hình mở rộng
-        case vertexExpressAQ = 2      // Cổng Vertex AI Express dành riêng cho khóa AQ.
+        case v1BetaStandard = 0
+        case v1BetaEnhanced = 1
+        case vertexExpressAQ = 2
     }
 
-    // Cấu hình người dùng
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: "gemini_api_key") ?? "" }
         set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_api_key") }
@@ -61,7 +59,6 @@ final class GeminiLiveService: NSObject {
         set { UserDefaults.standard.set(newValue, forKey: "gemini_sys_prompt") }
     }
 
-    // true = Thủ công (Tap-to-Finish), false = Tự động (Auto VAD)
     var isManualTurnMode: Bool = true
     private(set) var isMuted: Bool = false
     private(set) var state: LiveState = .disconnected {
@@ -79,6 +76,7 @@ final class GeminiLiveService: NSObject {
 
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    private var isPlayerNodeAttached = false
     private let playbackFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 24000,
@@ -94,16 +92,14 @@ final class GeminiLiveService: NSObject {
 
     override init() {
         super.init()
-        // Tự động chuyển model mặc định cũ sang models/gemini-2.0-flash-exp
         if UserDefaults.standard.string(forKey: "gemini_model") == "models/gemini-2.0-flash-live-001" {
             UserDefaults.standard.set("models/gemini-2.0-flash-exp", forKey: "gemini_model")
         }
         audioEngine.attach(playerNode)
+        isPlayerNodeAttached = true
         audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
         setupAudioSessionNotifications()
     }
-
-    // MARK: - Kết nối & Tự động tương thích khóa AQ. trên v1beta
 
     func connect() {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -145,7 +141,6 @@ final class GeminiLiveService: NSObject {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        // Đính kèm khóa vào Header để tương thích với cả khóa AQ. và AIzaSy trên cổng v1beta
         request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
 
         let ws = WebSocket(request: request)
@@ -156,13 +151,11 @@ final class GeminiLiveService: NSObject {
             guard let self = self else { return }
             self.stopAudioEngine()
 
-            // Nếu người dùng chủ động bấm Dừng thì không chạy fallback
             if self.isUserInitiatedDisconnect {
                 self.state = .disconnected
                 return
             }
 
-            // Nếu bị ngắt ngay trước khi hoàn tất Setup -> Tự động thử phương án dự phòng cho khóa AQ. / v1beta
             if !self.isSetupComplete {
                 if self.tryNextFallbackRoute(withKey: key) {
                     return
@@ -236,8 +229,6 @@ final class GeminiLiveService: NSObject {
         }
     }
 
-    // MARK: - Thao tác Tap-to-Finish (Chế độ Thủ công)
-
     func finishUserTurnManually() {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
 
@@ -258,7 +249,6 @@ final class GeminiLiveService: NSObject {
                 ]
                 sendJSON(payload)
             } else {
-                // Tín hiệu kết thúc lượt nói tương thích 100% với mọi nhánh v1beta
                 let payload: [String: Any] = [
                     "clientContent": [
                         "turnComplete": true
@@ -270,8 +260,6 @@ final class GeminiLiveService: NSObject {
             state = .waitingResponse
         }
     }
-
-    // MARK: - Gửi Khung hình Camera (Vision Live)
 
     func sendVideoFrame(jpegData: Data) {
         guard isSetupComplete, let ws = socket, ws.isConnected else { return }
@@ -288,8 +276,6 @@ final class GeminiLiveService: NSObject {
         ]
         sendJSON(payload)
     }
-
-    // MARK: - Cấu hình Gói Tin Setup Ban Đầu (Chuẩn v1beta)
 
     private func resolvedModelPath(for route: ConnectionRoute) -> String {
         let raw = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -332,7 +318,6 @@ final class GeminiLiveService: NSObject {
             ]
         ]
 
-        // Chỉ đính kèm các cờ mở rộng ở nhánh Enhanced để tránh lỗi 1007 (WSError error 1) trên v1beta chuẩn
         if route == .v1BetaEnhanced {
             setupContent["realtimeInputConfig"] = [
                 "automaticActivityDetection": [
@@ -346,8 +331,6 @@ final class GeminiLiveService: NSObject {
         let setupDict: [String: Any] = ["setup": setupContent]
         sendJSON(setupDict)
     }
-
-    // MARK: - Xử lý Phản hồi từ Máy chủ Gemini
 
     private func handleServerPayload(_ jsonString: String) {
         guard let data = jsonString.data(using: .utf8),
@@ -423,8 +406,6 @@ final class GeminiLiveService: NSObject {
         }
     }
 
-    // MARK: - Âm thanh Hai chiều & Chạy nền (AVAudioEngine)
-
     private func startAudioEngine() {
         do {
             let session = AVAudioSession.sharedInstance()
@@ -440,8 +421,16 @@ final class GeminiLiveService: NSObject {
             }
             audioEngine.reset()
 
-            if !audioEngine.attachedNodes.contains(playerNode) {
-                audioEngine.attach(playerNode)
+            if #available(iOS 13.0, *) {
+                if !audioEngine.attachedNodes.contains(playerNode) {
+                    audioEngine.attach(playerNode)
+                    isPlayerNodeAttached = true
+                }
+            } else {
+                if !isPlayerNodeAttached {
+                    audioEngine.attach(playerNode)
+                    isPlayerNodeAttached = true
+                }
             }
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
 
