@@ -494,26 +494,24 @@ final class GeminiLiveService: NSObject {
 
     private var isSetupComplete = false
     private var isTurnActivityOpen = false
+    private var isWaitingForServerResponse = false
     private var isServerTurnComplete = true
     private var scheduledBuffersCount = 0
     private var speechEndCooldownUntil: TimeInterval = 0
     private var waitingResponseStartedTime: TimeInterval = 0
     private var vadWatchdogTimer: Timer?
 
-    // MARK: - Smart Client-Side VAD (Tự động phát hiện nói & ngắt mic)
-    private var preRollBase64Chunks: [String] = []
-    private let maxPreRollChunks = 8 // ~340ms đón đầu chữ đầu tiên
-    private var ambientNoiseRms: Float = 0.012
-    private var smoothedRms: Float = 0.010
+    // MARK: - Hybrid VAD (Acoustic + Server InputTranscription)
+    private var ambientNoiseRms: Float = 0.015
+    private var smoothedRms: Float = 0.015
     private var isNoiseFloorCalibrated: Bool = false
     private var consecutiveVoiceFrames: Int = 0
-    private var consecutiveActiveFramesInTurn: Int = 0
-    private var turnOpenedTime: TimeInterval = 0
+    private var turnSpeechStartTime: TimeInterval = 0
     private var lastVoiceDetectedTime: TimeInterval = 0
-    private var lastStrongVoiceTime: TimeInterval = 0
+    private var lastHighPeakVoiceTime: TimeInterval = 0
     private var lastTranscriptUpdateTime: TimeInterval = 0
     private var hasReceivedTranscriptInTurn: Bool = false
-    private var peakVoiceRmsInTurn: Float = 0.025
+    private var peakSpeechRms: Float = 0.030
 
     private var currentUserTranscript = ""
     private var currentGeminiTranscript = ""
@@ -557,8 +555,8 @@ final class GeminiLiveService: NSObject {
         state = .connecting
         isSetupComplete = false
         isNoiseFloorCalibrated = false
-        ambientNoiseRms = 0.012
-        smoothedRms = 0.010
+        ambientNoiseRms = 0.015
+        smoothedRms = 0.015
         resetVADState()
         isServerTurnComplete = true
         scheduledBuffersCount = 0
@@ -633,16 +631,15 @@ final class GeminiLiveService: NSObject {
     private func resetVADState() {
         turnLock.lock()
         isTurnActivityOpen = false
+        isWaitingForServerResponse = false
         isUserTurnCapturing = false
-        preRollBase64Chunks.removeAll()
         consecutiveVoiceFrames = 0
-        consecutiveActiveFramesInTurn = 0
-        turnOpenedTime = 0
+        turnSpeechStartTime = 0
         lastVoiceDetectedTime = 0
-        lastStrongVoiceTime = 0
+        lastHighPeakVoiceTime = 0
         lastTranscriptUpdateTime = 0
         hasReceivedTranscriptInTurn = false
-        peakVoiceRmsInTurn = max(0.025, ambientNoiseRms * 1.8)
+        peakSpeechRms = max(0.030, ambientNoiseRms * 1.8)
         turnLock.unlock()
     }
 
@@ -650,9 +647,11 @@ final class GeminiLiveService: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.vadWatchdogTimer?.invalidate()
-            self.vadWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
                 self?.evaluateVADWatchdog()
             }
+            RunLoop.main.add(timer, forMode: .common)
+            self.vadWatchdogTimer = timer
         }
     }
 
@@ -667,10 +666,10 @@ final class GeminiLiveService: NSObject {
         guard isSetupComplete, !isMuted else { return }
         let now = CACurrentMediaTime()
 
-        // Tự động phục hồi nếu trạng thái waitingResponse bị treo quá 8 giây (do lượt thu âm rỗng/nhiễu ngắn)
-        if state == .waitingResponse && waitingResponseStartedTime > 0 && (now - waitingResponseStartedTime) >= 8.0 {
+        // Phục hồi nếu trạng thái waitingResponse chờ quá 6.5 giây mà server không trả về âm thanh
+        if state == .waitingResponse && waitingResponseStartedTime > 0 && (now - waitingResponseStartedTime) >= 6.5 {
             resetVADState()
-            speechEndCooldownUntil = now + 0.20
+            speechEndCooldownUntil = now + 0.25
             state = isMuted ? .muted : .listeningUser
             return
         }
@@ -678,37 +677,60 @@ final class GeminiLiveService: NSObject {
         guard !isManualTurnMode, state == .listeningUser else { return }
 
         turnLock.lock()
-        guard isTurnActivityOpen else {
+        guard isTurnActivityOpen, !isWaitingForServerResponse, isUserTurnCapturing else {
             turnLock.unlock()
             return
         }
 
-        let totalTurnDuration = now - turnOpenedTime
-        let silenceElapsed = now - lastVoiceDetectedTime
-        let strongVoiceSilenceElapsed = now - lastStrongVoiceTime
-        let requiredSilence = cachedSilenceTimeoutSeconds
-
-        let isAcousticSilenceComplete = (totalTurnDuration >= 0.30 && silenceElapsed >= requiredSilence)
-        let isTranscriptSilenceComplete = (
-            hasReceivedTranscriptInTurn &&
-            totalTurnDuration >= 0.50 &&
-            (now - lastTranscriptUpdateTime) >= (requiredSilence + 0.25) &&
-            strongVoiceSilenceElapsed >= requiredSilence
-        )
-        let isFalseTriggerTimeout = (
-            !hasReceivedTranscriptInTurn &&
-            totalTurnDuration >= max(1.6, requiredSilence * 1.8) &&
-            strongVoiceSilenceElapsed >= (requiredSilence + 0.15)
-        )
-
-        if isFalseTriggerTimeout && smoothedRms > ambientNoiseRms {
-            ambientNoiseRms = min(max(smoothedRms, 0.005), 0.065)
+        let decision = evaluateAutoCutDecisionLocked(now: now)
+        if decision == .resetFalseTrigger {
+            isUserTurnCapturing = false
+            consecutiveVoiceFrames = 0
+            ambientNoiseRms = min(max(max(ambientNoiseRms, smoothedRms), 0.006), 0.075)
+            turnLock.unlock()
+            return
         }
         turnLock.unlock()
 
-        if isAcousticSilenceComplete || isTranscriptSilenceComplete || isFalseTriggerTimeout {
+        if decision == .cutAndRespond {
             closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: true)
         }
+    }
+
+    private enum AutoCutDecision {
+        case keepListening
+        case resetFalseTrigger
+        case cutAndRespond
+    }
+
+    /// Đánh giá điều kiện tự động ngắt mic (gọi khi đang giữ turnLock)
+    private func evaluateAutoCutDecisionLocked(now: TimeInterval) -> AutoCutDecision {
+        let requiredSilence = cachedSilenceTimeoutSeconds
+        let speechDuration = now - turnSpeechStartTime
+        let silenceElapsed = now - lastVoiceDetectedTime
+        let highPeakSilenceElapsed = now - lastHighPeakVoiceTime
+        let hasValidSpeechEnergy = hasReceivedTranscriptInTurn || (peakSpeechRms >= ambientNoiseRms * 1.95 + 0.008)
+
+        // Điều kiện 1: Ngắt theo độ sụt giảm âm học chuẩn (Acoustic Drop)
+        if speechDuration >= 0.22 && silenceElapsed >= requiredSilence {
+            return hasValidSpeechEnergy ? .cutAndRespond : .resetFalseTrigger
+        }
+
+        // Điều kiện 2: Ngắt theo phụ đề Server (inputTranscription đã ngừng nhận từ mới -> Miễn nhiễm ồn nền/AGC)
+        if hasReceivedTranscriptInTurn &&
+            (now - lastTranscriptUpdateTime) >= (requiredSilence + 0.18) &&
+            highPeakSilenceElapsed >= min(0.42, requiredSilence * 0.55) {
+            return .cutAndRespond
+        }
+
+        // Điều kiện 3: Ngắt khi mức âm lượng đã giảm dưới 62% đỉnh giọng nói đủ lâu (chống kẹt khi AGC đẩy nền cao)
+        if speechDuration >= 0.30 &&
+            highPeakSilenceElapsed >= (requiredSilence + 0.22) &&
+            (!hasReceivedTranscriptInTurn || (now - lastTranscriptUpdateTime) >= requiredSilence) {
+            return hasValidSpeechEnergy ? .cutAndRespond : .resetFalseTrigger
+        }
+
+        return .keepListening
     }
 
     func toggleMute() {
@@ -725,11 +747,12 @@ final class GeminiLiveService: NSObject {
 
     func toggleTurnMode() {
         isManualTurnMode.toggle()
-        // Nếu đang thu dở câu nói khi đổi chế độ thì chốt câu luôn mà không cần ngắt kết nối
-        if isTurnActivityOpen {
+        if isTurnActivityOpen && isUserTurnCapturing {
             closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: true)
         } else {
-            resetVADState()
+            turnLock.lock()
+            isUserTurnCapturing = isManualTurnMode && isTurnActivityOpen
+            turnLock.unlock()
         }
     }
 
@@ -751,25 +774,35 @@ final class GeminiLiveService: NSObject {
 
     private func closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: Bool) {
         turnLock.lock()
-        let wasOpen = isTurnActivityOpen
+        let wasOpen = isTurnActivityOpen && !isWaitingForServerResponse
         isTurnActivityOpen = false
         isUserTurnCapturing = false
-        preRollBase64Chunks.removeAll()
+        if shouldWaitForResponse && wasOpen {
+            isWaitingForServerResponse = true
+        }
         consecutiveVoiceFrames = 0
-        consecutiveActiveFramesInTurn = 0
-        turnOpenedTime = 0
+        turnSpeechStartTime = 0
         lastVoiceDetectedTime = 0
-        lastStrongVoiceTime = 0
+        lastHighPeakVoiceTime = 0
         lastTranscriptUpdateTime = 0
         hasReceivedTranscriptInTurn = false
-        peakVoiceRmsInTurn = max(0.025, ambientNoiseRms * 1.8)
+        peakSpeechRms = max(0.030, ambientNoiseRms * 1.8)
         turnLock.unlock()
 
         if wasOpen {
-            if shouldWaitForResponse && state != .disconnected {
-                state = .waitingResponse
-            }
             sendJSON(["realtimeInput": ["activityEnd": [:]]])
+            if shouldWaitForResponse {
+                if Thread.isMainThread {
+                    if self.state != .disconnected {
+                        self.state = .waitingResponse
+                    }
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self, self.state != .disconnected else { return }
+                        self.state = .waitingResponse
+                    }
+                }
+            }
         }
     }
 
@@ -786,6 +819,10 @@ final class GeminiLiveService: NSObject {
         if isTurnActivityOpen {
             closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: false)
         }
+
+        turnLock.lock()
+        isWaitingForServerResponse = true
+        turnLock.unlock()
 
         currentUserTranscript = promptText
         currentGeminiTranscript = ""
@@ -898,7 +935,6 @@ final class GeminiLiveService: NSObject {
                 guard let self = self else { return }
                 self.isSetupComplete = true
                 self.isNoiseFloorCalibrated = false
-                self.speechEndCooldownUntil = CACurrentMediaTime() + 0.25
                 self.resetVADState()
                 self.startAudioEngine()
                 self.startVADWatchdogTimer()
@@ -933,13 +969,24 @@ final class GeminiLiveService: NSObject {
            let text = inputTranscription["text"] as? String, !text.isEmpty {
             currentUserTranscript += text
             let transcript = currentUserTranscript
+            let trimmedPiece = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            turnLock.lock()
-            if isTurnActivityOpen {
-                hasReceivedTranscriptInTurn = true
-                lastTranscriptUpdateTime = CACurrentMediaTime()
+            if !trimmedPiece.isEmpty {
+                let now = CACurrentMediaTime()
+                turnLock.lock()
+                if isTurnActivityOpen && !isWaitingForServerResponse {
+                    hasReceivedTranscriptInTurn = true
+                    lastTranscriptUpdateTime = now
+                    if !isUserTurnCapturing {
+                        isUserTurnCapturing = true
+                        turnSpeechStartTime = now
+                        lastVoiceDetectedTime = now
+                        lastHighPeakVoiceTime = now
+                        peakSpeechRms = max(peakSpeechRms, smoothedRms, ambientNoiseRms * 2.0)
+                    }
+                }
+                turnLock.unlock()
             }
-            turnLock.unlock()
 
             DispatchQueue.main.async { [weak self] in
                 self?.delegate?.didUpdateTranscript(userText: transcript, geminiText: nil, isTurnComplete: false)
@@ -1000,7 +1047,7 @@ final class GeminiLiveService: NSObject {
                 self.delegate?.didUpdateTranscript(userText: finalUser, geminiText: finalGemini, isTurnComplete: true)
                 self.isServerTurnComplete = true
                 if self.scheduledBuffersCount == 0 && self.state != .muted {
-                    self.speechEndCooldownUntil = CACurrentMediaTime() + 0.45
+                    self.speechEndCooldownUntil = CACurrentMediaTime() + 0.40
                     self.resetVADState()
                     self.state = .listeningUser
                 }
@@ -1111,6 +1158,9 @@ final class GeminiLiveService: NSObject {
             audioEngine.prepare()
             try audioEngine.start()
             playerNode.play()
+
+            // Đặt thời gian chờ đo nền tạp âm SAU KHI phần cứng AudioEngine đã khởi chạy xong
+            speechEndCooldownUntil = CACurrentMediaTime() + 0.35
         } catch {
             delegate?.didEncounterError("Lỗi AudioEngine: \(error.localizedDescription)")
         }
@@ -1157,7 +1207,7 @@ final class GeminiLiveService: NSObject {
         guard error == nil, pcm16Buffer.frameLength > 0,
               let int16Ptr = pcm16Buffer.int16ChannelData?[0] else { return }
 
-        // Tính RMS chuẩn xác trực tiếp trên luồng PCM 16kHz
+        // Tính RMS trực tiếp trên luồng PCM 16kHz
         let sampleCount = Int(pcm16Buffer.frameLength)
         var sumSquares: Float = 0
         for i in 0..<sampleCount {
@@ -1166,156 +1216,131 @@ final class GeminiLiveService: NSObject {
         }
         let rawRms = sqrt(sumSquares / Float(max(sampleCount, 1)))
 
-        turnLock.lock()
-        smoothedRms = smoothedRms * 0.55 + rawRms * 0.45
+        // Bỏ qua các buffer 0.0 khi phần cứng ADC vừa khởi động
+        if rawRms < 0.0003 && !isNoiseFloorCalibrated {
+            return
+        }
 
-        // Trong thời gian cooldown (mới kết nối hoặc Gemini vừa nói xong), đo nền tạp âm thực tế
+        turnLock.lock()
+        if isWaitingForServerResponse {
+            turnLock.unlock()
+            return
+        }
+
+        smoothedRms = isNoiseFloorCalibrated ? (smoothedRms * 0.55 + rawRms * 0.45) : rawRms
+
+        // Trong thời gian cooldown, đo nền tạp âm thực tế của môi trường
         if now < speechEndCooldownUntil {
-            if speechEndCooldownUntil - now <= 0.18 {
-                if !isNoiseFloorCalibrated {
-                    ambientNoiseRms = min(max(rawRms, 0.005), 0.065)
-                    smoothedRms = ambientNoiseRms
-                    isNoiseFloorCalibrated = true
-                } else {
-                    ambientNoiseRms = min(max(ambientNoiseRms * 0.85 + rawRms * 0.15, 0.005), 0.065)
-                }
+            if !isNoiseFloorCalibrated {
+                ambientNoiseRms = min(max(rawRms, 0.006), 0.075)
+                smoothedRms = ambientNoiseRms
+                isNoiseFloorCalibrated = true
+            } else {
+                ambientNoiseRms = min(max(ambientNoiseRms * 0.80 + rawRms * 0.20, 0.006), 0.075)
             }
             turnLock.unlock()
             return
         }
 
         if !isNoiseFloorCalibrated {
-            ambientNoiseRms = min(max(rawRms, 0.005), 0.065)
+            ambientNoiseRms = min(max(rawRms, 0.006), 0.075)
             smoothedRms = ambientNoiseRms
             isNoiseFloorCalibrated = true
         }
+
         let currentSmoothedRms = smoothedRms
+
+        // Đồng bộ luồng: Mở activityStart ngay khi vào trạng thái lắng nghe (giống hệt chế độ Thủ công)
+        let needSendActivityStart = !isTurnActivityOpen
+        if needSendActivityStart {
+            isTurnActivityOpen = true
+            if isManualTurnMode {
+                isUserTurnCapturing = true
+                turnSpeechStartTime = now
+                lastVoiceDetectedTime = now
+                lastHighPeakVoiceTime = now
+            }
+        }
         turnLock.unlock()
 
         let visualLevel = min(max(CGFloat(currentSmoothedRms * 7.0), 0.02), 1.0)
         delegate?.didUpdateAudioLevel(visualLevel)
+
+        if needSendActivityStart {
+            sendJSON(["realtimeInput": ["activityStart": [:]]])
+        }
 
         let byteCount = sampleCount * MemoryLayout<Int16>.size
         let pcmData = Data(bytes: int16Ptr, count: byteCount)
         let base64Chunk = pcmData.base64EncodedString()
 
         if isManualTurnMode {
-            // CHẾ ĐỘ THỦ CÔNG: Thu âm liên tục cho tới khi người dùng chạm Quả cầu
-            turnLock.lock()
-            let needStart = !isTurnActivityOpen
-            if needStart {
-                isTurnActivityOpen = true
+            // CHẾ ĐỘ THỦ CÔNG: Gửi liên tục cho tới khi người dùng chạm Quả cầu
+            sendAudioChunkBase64(base64Chunk)
+            return
+        }
+
+        // CHẾ ĐỘ TỰ ĐỘNG: Gửi luồng âm thanh và tự động phát hiện khi bắt đầu/kết thúc câu nói
+        turnLock.lock()
+        guard isTurnActivityOpen, !isWaitingForServerResponse else {
+            turnLock.unlock()
+            return
+        }
+
+        if !isUserTurnCapturing {
+            let speechStartThreshold = max(0.016, ambientNoiseRms * 1.75 + 0.005)
+            if currentSmoothedRms >= speechStartThreshold || rawRms >= speechStartThreshold * 1.15 {
+                consecutiveVoiceFrames += 1
+            } else {
+                consecutiveVoiceFrames = 0
+                // Cập nhật liên tục nền tạp âm môi trường khi chưa nói
+                if currentSmoothedRms < ambientNoiseRms {
+                    ambientNoiseRms = max(0.006, ambientNoiseRms * 0.82 + currentSmoothedRms * 0.18)
+                } else {
+                    ambientNoiseRms = min(0.075, ambientNoiseRms * 0.94 + currentSmoothedRms * 0.06)
+                }
+            }
+
+            if consecutiveVoiceFrames >= 2 {
                 isUserTurnCapturing = true
-                turnOpenedTime = now
+                turnSpeechStartTime = now
                 lastVoiceDetectedTime = now
+                lastHighPeakVoiceTime = now
+                peakSpeechRms = max(currentSmoothedRms, rawRms, speechStartThreshold * 1.15)
+                consecutiveVoiceFrames = 0
             }
             turnLock.unlock()
-
-            if needStart {
-                sendJSON(["realtimeInput": ["activityStart": [:]]])
-            }
             sendAudioChunkBase64(base64Chunk)
         } else {
-            // CHẾ ĐỘ TỰ ĐỘNG (SMART CLIENT-SIDE VAD + HYBRID TRANSCRIPT):
-            turnLock.lock()
-            if !isTurnActivityOpen {
-                preRollBase64Chunks.append(base64Chunk)
-                if preRollBase64Chunks.count > maxPreRollChunks {
-                    preRollBase64Chunks.removeFirst()
-                }
+            // Đang trong câu nói của người dùng: Theo dõi đỉnh giọng nói & khoảng lặng
+            peakSpeechRms = max(peakSpeechRms, currentSmoothedRms)
 
-                let startThreshold = max(0.015, min(ambientNoiseRms * 1.95 + 0.006, 0.075))
-                if currentSmoothedRms >= startThreshold || rawRms >= startThreshold * 1.15 {
-                    consecutiveVoiceFrames += 1
-                    // Tránh kẹt nền tạp âm nếu môi trường ồn tăng lên đột ngột
-                    if consecutiveVoiceFrames == 1 {
-                        ambientNoiseRms = min(max(ambientNoiseRms * 0.98 + currentSmoothedRms * 0.02, 0.004), 0.065)
-                    }
-                } else {
-                    consecutiveVoiceFrames = 0
-                    ambientNoiseRms = min(max(ambientNoiseRms * 0.92 + currentSmoothedRms * 0.08, 0.004), 0.065)
-                }
+            let silenceThreshold = max(
+                ambientNoiseRms * 1.40 + 0.004,
+                ambientNoiseRms + (peakSpeechRms - ambientNoiseRms) * 0.38
+            )
 
-                // Khi có >= 2 frame giọng nói liên tiếp (~85ms) -> Bắt đầu lượt nói
-                if consecutiveVoiceFrames >= 2 {
-                    isTurnActivityOpen = true
-                    isUserTurnCapturing = true
-                    turnOpenedTime = now
-                    lastVoiceDetectedTime = now
-                    lastStrongVoiceTime = now
-                    lastTranscriptUpdateTime = now
-                    hasReceivedTranscriptInTurn = false
-                    peakVoiceRmsInTurn = max(currentSmoothedRms, rawRms, startThreshold * 1.2)
-                    let chunksToFlush = preRollBase64Chunks
-                    preRollBase64Chunks.removeAll()
-                    consecutiveVoiceFrames = 0
-                    consecutiveActiveFramesInTurn = 2
-                    turnLock.unlock()
+            if currentSmoothedRms >= silenceThreshold {
+                lastVoiceDetectedTime = now
+            }
 
-                    sendJSON(["realtimeInput": ["activityStart": [:]]])
-                    for chunk in chunksToFlush {
-                        sendAudioChunkBase64(chunk)
-                    }
-                } else {
-                    turnLock.unlock()
-                }
+            if currentSmoothedRms >= max(silenceThreshold, peakSpeechRms * 0.62) {
+                lastHighPeakVoiceTime = now
+            }
+
+            let decision = evaluateAutoCutDecisionLocked(now: now)
+            if decision == .resetFalseTrigger {
+                isUserTurnCapturing = false
+                consecutiveVoiceFrames = 0
+                ambientNoiseRms = min(max(max(ambientNoiseRms, currentSmoothedRms), 0.006), 0.075)
+                turnLock.unlock()
+                sendAudioChunkBase64(base64Chunk)
+            } else if decision == .cutAndRespond {
+                turnLock.unlock()
+                closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: true)
             } else {
-                // Đang trong lượt nói của người dùng ở chế độ Tự động
-                let noiseBasedThreshold = max(0.012, ambientNoiseRms * 1.55 + 0.004)
-                let peakDropThreshold = min(peakVoiceRmsInTurn * 0.36, noiseBasedThreshold * 2.5)
-                let continueThreshold = max(noiseBasedThreshold, peakDropThreshold)
-
-                if currentSmoothedRms >= continueThreshold {
-                    consecutiveActiveFramesInTurn += 1
-                    peakVoiceRmsInTurn = max(currentSmoothedRms, peakVoiceRmsInTurn * 0.975)
-
-                    // Chống nhiễu (Hysteresis): Nếu đã im lặng > 0.16s thì cần >= 2 frame liên tiếp mới tính là nói lại
-                    if (now - lastVoiceDetectedTime) < 0.16 ||
-                        consecutiveActiveFramesInTurn >= 2 ||
-                        currentSmoothedRms >= continueThreshold * 1.35 {
-                        lastVoiceDetectedTime = now
-                    }
-
-                    if currentSmoothedRms >= max(continueThreshold * 1.20, peakVoiceRmsInTurn * 0.50) {
-                        lastStrongVoiceTime = now
-                    }
-                } else {
-                    consecutiveActiveFramesInTurn = 0
-                }
-
-                let silenceElapsed = now - lastVoiceDetectedTime
-                let strongVoiceSilenceElapsed = now - lastStrongVoiceTime
-                let totalTurnDuration = now - turnOpenedTime
-                let requiredSilence = cachedSilenceTimeoutSeconds
-
-                // Điều kiện 1: Ngắt theo khoảng lặng âm học chuẩn
-                let isAcousticSilenceComplete = (totalTurnDuration >= 0.30 && silenceElapsed >= requiredSilence)
-
-                // Điều kiện 2: Ngắt kết hợp Transcript Server (khi phòng ồn hoặc AGC giữ nền cao sau khi nói)
-                let isTranscriptSilenceComplete = (
-                    hasReceivedTranscriptInTurn &&
-                    totalTurnDuration >= 0.50 &&
-                    (now - lastTranscriptUpdateTime) >= (requiredSilence + 0.25) &&
-                    strongVoiceSilenceElapsed >= requiredSilence
-                )
-
-                // Điều kiện 3: Tự thu hồi nếu mở nhầm do tạp âm mà không có tiếng nói thực sự
-                let isFalseTriggerTimeout = (
-                    !hasReceivedTranscriptInTurn &&
-                    totalTurnDuration >= max(1.6, requiredSilence * 1.8) &&
-                    strongVoiceSilenceElapsed >= (requiredSilence + 0.15)
-                )
-
-                if isAcousticSilenceComplete || isTranscriptSilenceComplete || isFalseTriggerTimeout {
-                    if isFalseTriggerTimeout && currentSmoothedRms > ambientNoiseRms {
-                        ambientNoiseRms = min(max(currentSmoothedRms, 0.005), 0.065)
-                    }
-                    turnLock.unlock()
-                    closeActiveUserTurnAndWaitResponse(shouldWaitForResponse: true)
-                } else {
-                    turnLock.unlock()
-                    sendAudioChunkBase64(base64Chunk)
-                }
+                turnLock.unlock()
+                sendAudioChunkBase64(base64Chunk)
             }
         }
     }
@@ -1371,7 +1396,7 @@ final class GeminiLiveService: NSObject {
                     guard let self = self else { return }
                     self.scheduledBuffersCount = max(0, self.scheduledBuffersCount - 1)
                     if self.scheduledBuffersCount == 0 && self.isServerTurnComplete && self.state == .geminiSpeaking {
-                        self.speechEndCooldownUntil = CACurrentMediaTime() + 0.45
+                        self.speechEndCooldownUntil = CACurrentMediaTime() + 0.40
                         self.resetVADState()
                         self.state = self.isMuted ? .muted : .listeningUser
                     }
