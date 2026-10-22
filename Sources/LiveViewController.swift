@@ -39,6 +39,7 @@ final class LiveViewController: UIViewController {
     private let tuningCard = UIView()
     private let tempValueLabel = UILabel()
     private let tempSlider = UISlider()
+    private let searchSegment = UISegmentedControl(items: ["🌐 Bật Google Search", "📴 Tắt Search"])
     private let lengthSegment = UISegmentedControl(items: ["Ngắn (1-2c)", "Vừa (2-4c)", "Chuyên sâu"])
     private let silenceSegment = UISegmentedControl(items: ["Nhanh (0.65s)", "Chuẩn (0.9s)", "Chậm (1.3s)"])
     private let vibeListScrollView = UIScrollView()
@@ -68,6 +69,7 @@ final class LiveViewController: UIViewController {
     private var conversationHistory: [(speaker: String, text: String, isGemini: Bool)] = []
     private var activeUserStreamingText: String = ""
     private var activeGeminiStreamingText: String = ""
+    private var activeGroundingSummary: String = ""
 
     // MARK: - Thanh con nhộng điều khiển (Floating Pill Bar)
     private let pillBar = UIView()
@@ -300,7 +302,7 @@ final class LiveViewController: UIViewController {
         ])
     }
 
-    // MARK: - Bảng Điều Chỉnh Thông Số (Độ dài, Tự ngắt Mic, Sáng tạo & 10 Chế độ Vibe)
+    // MARK: - Bảng Điều Chỉnh Thông Số (Độ dài, Tự ngắt Mic, Google Search & 10 Chế độ Vibe)
 
     private func setupTuningOverlay() {
         tuningOverlay.translatesAutoresizingMaskIntoConstraints = false
@@ -316,7 +318,7 @@ final class LiveViewController: UIViewController {
         tuningOverlay.addSubview(tuningCard)
 
         let titleLabel = UILabel()
-        titleLabel.text = "🎛️ Cài đặt Huấn luyện, Độ dài & Ngắt Mic"
+        titleLabel.text = "🎛️ Cài đặt Huấn luyện, Search & Ngắt Mic"
         titleLabel.font = UIFont.systemFont(ofSize: 15, weight: .bold)
         titleLabel.textColor = .white
         titleLabel.textAlignment = .center
@@ -371,6 +373,15 @@ final class LiveViewController: UIViewController {
             vibeOptionButtons.append(btn)
         }
         refreshVibeSelectionHighlight()
+
+        // 1.5. Công cụ Google Search Grounding
+        let searchTitle = UILabel()
+        searchTitle.text = "🌐 Tra cứu dữ liệu thời gian thực (Google Search):"
+        searchTitle.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        searchTitle.textColor = UIColor(white: 0.90, alpha: 1.0)
+
+        searchSegment.selectedSegmentIndex = liveService.isGoogleSearchEnabled ? 0 : 1
+        styleSegmentedControl(searchSegment)
 
         // 2. Độ dài câu trả lời
         let lengthTitle = UILabel()
@@ -442,6 +453,8 @@ final class LiveViewController: UIViewController {
             titleLabel,
             vibeTitle,
             vibeListScrollView,
+            searchTitle,
+            searchSegment,
             lengthTitle,
             lengthSegment,
             silenceTitle,
@@ -452,7 +465,7 @@ final class LiveViewController: UIViewController {
         ])
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         mainStack.axis = .vertical
-        mainStack.spacing = 9
+        mainStack.spacing = 8
         tuningCard.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
@@ -471,7 +484,7 @@ final class LiveViewController: UIViewController {
             mainStack.leadingAnchor.constraint(equalTo: tuningCard.leadingAnchor, constant: 14),
             mainStack.trailingAnchor.constraint(equalTo: tuningCard.trailingAnchor, constant: -14),
 
-            vibeListScrollView.heightAnchor.constraint(equalToConstant: 215),
+            vibeListScrollView.heightAnchor.constraint(equalToConstant: 180),
 
             vibeListStackView.topAnchor.constraint(equalTo: vibeListScrollView.topAnchor, constant: 8),
             vibeListStackView.bottomAnchor.constraint(equalTo: vibeListScrollView.bottomAnchor, constant: -8),
@@ -526,7 +539,7 @@ final class LiveViewController: UIViewController {
         tempValueLabel.text = "\(formatted) (\(desc))"
     }
 
-    // MARK: - Khung Live Lyric (Đã sửa triệt để lỗi đè chữ lên 3 nút Xóa / Chép / Mở rộng)
+    // MARK: - Khung Live Lyric
 
     private func setupSubtitleBox() {
         subtitleContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -546,7 +559,6 @@ final class LiveViewController: UIViewController {
         lyricTitleLabel.textColor = UIColor(red: 0.65, green: 0.82, blue: 1.0, alpha: 1.0)
         lyricTitleLabel.lineBreakMode = .byTruncatingTail
         lyricTitleLabel.numberOfLines = 1
-        // Ưu tiên co giãn thấp hơn cụm nút bên phải để không bao giờ đè lên nút
         lyricTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         lyricTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         lyricHeaderBar.addSubview(lyricTitleLabel)
@@ -655,7 +667,15 @@ final class LiveViewController: UIViewController {
         }
 
         let vibe = liveService.personaVibeStyle
-        currentPrompts = vibe.quickActionPrompts
+        var prompts = vibe.quickActionPrompts
+        if liveService.isGoogleSearchEnabled {
+            let testPrompt = (
+                title: "🌐 Test Google Search",
+                prompt: "Hãy dùng Google Search tra cứu giúp tôi: hôm nay là thứ mấy, ngày bao nhiêu, giá vàng hoặc tin tức công nghệ mới nhất hôm nay là gì, và nêu rõ nguồn bạn vừa tìm được."
+            )
+            prompts.insert(testPrompt, at: 0)
+        }
+        currentPrompts = prompts
         let isGrowth = vibe.isGrowthOrKnowledgeMode
 
         for (index, item) in currentPrompts.enumerated() {
@@ -664,14 +684,21 @@ final class LiveViewController: UIViewController {
             chip.setTitle(item.title, for: .normal)
             chip.setTitleColor(.white, for: .normal)
             chip.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
-            chip.backgroundColor = isGrowth
-                ? UIColor(red: 0.16, green: 0.36, blue: 0.65, alpha: 0.65)
-                : UIColor(red: 0.45, green: 0.25, blue: 0.48, alpha: 0.58)
+
+            let isSearchTestChip = (liveService.isGoogleSearchEnabled && index == 0)
+            if isSearchTestChip {
+                chip.backgroundColor = UIColor(red: 0.12, green: 0.52, blue: 0.36, alpha: 0.78)
+                chip.layer.borderColor = UIColor(red: 0.30, green: 0.92, blue: 0.58, alpha: 0.75).cgColor
+            } else {
+                chip.backgroundColor = isGrowth
+                    ? UIColor(red: 0.16, green: 0.36, blue: 0.65, alpha: 0.65)
+                    : UIColor(red: 0.45, green: 0.25, blue: 0.48, alpha: 0.58)
+                chip.layer.borderColor = isGrowth
+                    ? UIColor(red: 0.38, green: 0.68, blue: 1.0, alpha: 0.55).cgColor
+                    : UIColor(red: 0.90, green: 0.45, blue: 0.62, alpha: 0.5).cgColor
+            }
             chip.layer.cornerRadius = 15
             chip.layer.borderWidth = 1
-            chip.layer.borderColor = isGrowth
-                ? UIColor(red: 0.38, green: 0.68, blue: 1.0, alpha: 0.55).cgColor
-                : UIColor(red: 0.90, green: 0.45, blue: 0.62, alpha: 0.5).cgColor
             chip.contentEdgeInsets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
             chip.addTarget(self, action: #selector(handleCreativeChipTap(_:)), for: .touchUpInside)
             suggestionStackView.addArrangedSubview(chip)
@@ -726,7 +753,8 @@ final class LiveViewController: UIViewController {
 
     private func renderLyricContent() {
         let vibe = liveService.personaVibeStyle
-        lyricTitleLabel.text = "💬 \(vibe.shortTitle) • \(liveService.responseLengthStyle.shortTitle)"
+        let searchBadge = liveService.isGoogleSearchEnabled ? " • 🌐" : ""
+        lyricTitleLabel.text = "💬 \(vibe.shortTitle) • \(liveService.responseLengthStyle.shortTitle)\(searchBadge)"
 
         let attributed = NSMutableAttributedString()
         let paragraphStyle = NSMutableParagraphStyle()
@@ -761,13 +789,19 @@ final class LiveViewController: UIViewController {
             .foregroundColor: UIColor.white,
             .paragraphStyle: paragraphStyle
         ]
+        let groundingAttributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: UIColor(red: 0.30, green: 0.92, blue: 0.58, alpha: 1.0),
+            .paragraphStyle: paragraphStyle
+        ]
 
-        if conversationHistory.isEmpty && activeUserStreamingText.isEmpty && activeGeminiStreamingText.isEmpty {
+        if conversationHistory.isEmpty && activeUserStreamingText.isEmpty && activeGeminiStreamingText.isEmpty && activeGroundingSummary.isEmpty {
             let modeAutoDesc = liveService.isManualTurnMode
                 ? "Thủ công (Chạm quả cầu khi nói xong)"
                 : "Tự động ngắt mic sau \(liveService.autoSilenceTimeoutStyle.title)"
+            let searchStatusDesc = liveService.isGoogleSearchEnabled ? "🌐 Đang bật" : "📴 Đang tắt"
             let welcome = NSAttributedString(
-                string: "🎯 Chế độ hiện tại: \(vibe.title) — \(vibe.subtitleDescription).\n• Giọng: \(liveService.voiceName) | Độ dài: \(liveService.responseLengthStyle.title) | Mic: \(modeAutoDesc).\n👉 Nhấn ▶️ Bắt đầu để đàm thoại hoặc bấm '🎛️ Chế độ & Vibe' ở góc trên để đổi phong cách rèn luyện!",
+                string: "🎯 Chế độ hiện tại: \(vibe.title) — \(vibe.subtitleDescription).\n• Giọng: \(liveService.voiceName) | Độ dài: \(liveService.responseLengthStyle.title) | Google Search: \(searchStatusDesc) | Mic: \(modeAutoDesc).\n👉 Nhấn ▶️ Bắt đầu rồi bấm thẻ '🌐 Test Google Search' ở trên để kiểm tra tra cứu trực tiếp!",
                 attributes: geminiHistoryAttributes
             )
             attributed.append(welcome)
@@ -784,6 +818,10 @@ final class LiveViewController: UIViewController {
             if !activeUserStreamingText.isEmpty {
                 attributed.append(NSAttributedString(string: "🗣️ Bạn (đang nói): ", attributes: userHeaderAttributes))
                 attributed.append(NSAttributedString(string: "\(activeUserStreamingText)\n", attributes: userBodyAttributes))
+            }
+
+            if !activeGroundingSummary.isEmpty {
+                attributed.append(NSAttributedString(string: "\(activeGroundingSummary)\n", attributes: groundingAttributes))
             }
 
             if !activeGeminiStreamingText.isEmpty {
@@ -836,6 +874,7 @@ final class LiveViewController: UIViewController {
     @objc private func showTuningPanel() {
         pendingSelectedVibe = liveService.personaVibeStyle
         refreshVibeSelectionHighlight()
+        searchSegment.selectedSegmentIndex = liveService.isGoogleSearchEnabled ? 0 : 1
         tempSlider.value = liveService.creativityTemperature
         updateTempLabelText(liveService.creativityTemperature)
         lengthSegment.selectedSegmentIndex = liveService.responseLengthStyle.rawValue
@@ -862,6 +901,7 @@ final class LiveViewController: UIViewController {
 
     @objc private func applyTuningChanges() {
         liveService.personaVibeStyle = pendingSelectedVibe
+        liveService.isGoogleSearchEnabled = (searchSegment.selectedSegmentIndex == 0)
         liveService.creativityTemperature = tempSlider.value
         if let length = ResponseLengthStyle(rawValue: lengthSegment.selectedSegmentIndex) {
             liveService.responseLengthStyle = length
@@ -921,6 +961,7 @@ final class LiveViewController: UIViewController {
         conversationHistory.removeAll()
         activeUserStreamingText = ""
         activeGeminiStreamingText = ""
+        activeGroundingSummary = ""
         renderLyricContent()
     }
 
@@ -1010,7 +1051,7 @@ final class LiveViewController: UIViewController {
     @objc private func openSettings() {
         let alert = UIAlertController(
             title: "⚙️ Cài đặt API & Yêu cầu riêng",
-            message: "Để đổi Chế độ (Nghiêm khắc, Dạy học, Khoa học, Phê bình...) hãy bấm nút '🎛️ Chế độ & Vibe' trên màn hình chính.",
+            message: "Để đổi Chế độ (Nghiêm khắc, Dạy học, Khoa học, Phê bình...) hoặc Bật/Tắt Google Search hãy bấm nút '🎛️ Chế độ & Vibe' trên màn hình chính.",
             preferredStyle: .alert
         )
         alert.addTextField { tf in
@@ -1162,7 +1203,7 @@ final class LiveViewController: UIViewController {
     }
 }
 
-// MARK: - Delegate Nhận Trạng thái & Phụ đề Cuộn Trực Tiếp
+// MARK: - Delegate Nhận Trạng thái, Xác thực Google Search & Phụ đề Cuộn Trực Tiếp
 
 extension LiveViewController: GeminiLiveServiceDelegate {
     func didChangeState(_ state: LiveState) {
@@ -1179,6 +1220,15 @@ extension LiveViewController: GeminiLiveServiceDelegate {
         }
     }
 
+    func didReceiveGroundingMetadata(queries: [String], sources: [String]) {
+        let queryText = queries.isEmpty ? "Đang tra cứu trực tiếp" : queries.joined(separator: ", ")
+        let sourceText = sources.isEmpty ? "" : " | Nguồn: \(sources.prefix(3).joined(separator: ", "))"
+        activeGroundingSummary = "✅ 🌐 [Google Search đã chạy] Từ khóa: \"\(queryText)\"\(sourceText)"
+
+        statusBadge.setTitle("🌐 Đã tra cứu Google Search", for: .normal)
+        renderLyricContent()
+    }
+
     func didUpdateTranscript(userText: String?, geminiText: String?, isTurnComplete: Bool) {
         if let u = userText, !u.isEmpty {
             activeUserStreamingText = u
@@ -1192,12 +1242,20 @@ extension LiveViewController: GeminiLiveServiceDelegate {
             if !trimmedUser.isEmpty {
                 conversationHistory.append((speaker: "Bạn", text: trimmedUser, isGemini: false))
             }
-            let trimmedGemini = activeGeminiStreamingText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var trimmedGemini = activeGeminiStreamingText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !activeGroundingSummary.isEmpty {
+                trimmedGemini = trimmedGemini.isEmpty
+                    ? activeGroundingSummary
+                    : "\(trimmedGemini)\n\(activeGroundingSummary)"
+            }
             if !trimmedGemini.isEmpty {
                 conversationHistory.append((speaker: liveService.personaVibeStyle.speakerDisplayName, text: trimmedGemini, isGemini: true))
             }
+
             activeUserStreamingText = ""
             activeGeminiStreamingText = ""
+            activeGroundingSummary = ""
         }
 
         renderLyricContent()
