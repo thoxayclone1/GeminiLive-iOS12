@@ -308,6 +308,7 @@ protocol GeminiLiveServiceDelegate: AnyObject {
     func didUpdateVoiceActivity(isSpeaking: Bool)
     func didUpdateAudioLevel(_ level: CGFloat)
     func didUpdateTranscript(userText: String?, geminiText: String?, isTurnComplete: Bool)
+    func didReceiveGroundingMetadata(queries: [String], sources: [String])
     func didEncounterError(_ message: String)
 }
 
@@ -418,12 +419,28 @@ final class GeminiLiveService: NSObject {
         set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "gemini_custom_extra_prompt") }
     }
 
+    /// Bật/tắt Google Search Grounding (Mặc định: true)
+    var isGoogleSearchEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "gemini_google_search_enabled") == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: "gemini_google_search_enabled")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "gemini_google_search_enabled")
+        }
+    }
+
     var effectiveSystemPrompt: String {
         let vibe = personaVibeStyle
         var components: [String] = [
             vibe.personaInstruction,
             responseLengthStyle.promptInstruction(isGrowthMode: vibe.isGrowthOrKnowledgeMode)
         ]
+        if isGoogleSearchEnabled {
+            components.append("CÔNG CỤ TRA CỨU TRỰC TIẾP: Bạn được kết nối với Google Search. Khi người dùng hỏi về tin tức mới, thời gian thực, ngày giờ, giá cả, thời tiết, kết quả thể thao, sự kiện gần đây hoặc yêu cầu kiểm tra Google Search, hãy BẮT BUỘC dùng công cụ Google Search để lấy dữ liệu mới nhất và trả lời chuẩn xác.")
+        }
         if !customExtraPrompt.isEmpty {
             components.append("YÊU CẦU RIÊNG CỦA NGƯỜI DÙNG: \(customExtraPrompt)")
         }
@@ -484,6 +501,8 @@ final class GeminiLiveService: NSObject {
     private var currentUserTranscript = ""
     private var currentGeminiTranscript = ""
     private var didReceiveOutputTranscriptionInTurn = false
+    private var currentTurnSearchQueries: [String] = []
+    private var currentTurnSearchSources: [String] = []
 
     override init() {
         super.init()
@@ -523,6 +542,8 @@ final class GeminiLiveService: NSObject {
         currentUserTranscript = ""
         currentGeminiTranscript = ""
         didReceiveOutputTranscriptionInTurn = false
+        currentTurnSearchQueries.removeAll()
+        currentTurnSearchSources.removeAll()
 
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
         let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
@@ -579,6 +600,8 @@ final class GeminiLiveService: NSObject {
         resetVADState()
         isServerTurnComplete = true
         scheduledBuffersCount = 0
+        currentTurnSearchQueries.removeAll()
+        currentTurnSearchSources.removeAll()
         state = .disconnected
     }
 
@@ -667,6 +690,8 @@ final class GeminiLiveService: NSObject {
         currentUserTranscript = promptText
         currentGeminiTranscript = ""
         didReceiveOutputTranscriptionInTurn = false
+        currentTurnSearchQueries.removeAll()
+        currentTurnSearchSources.removeAll()
 
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.didUpdateTranscript(userText: promptText, geminiText: nil, isTurnComplete: false)
@@ -719,7 +744,7 @@ final class GeminiLiveService: NSObject {
 
         // Sử dụng cơ chế điều khiển lượt nói tường minh (disabled: true + activityStart/activityEnd)
         // cho cả Tự động (qua Smart Client-Side VAD) lẫn Thủ công để đảm bảo tự ngắt mic 100% chính xác
-        let setupContent: [String: Any] = [
+        var setupContent: [String: Any] = [
             "model": formattedModel,
             "generationConfig": [
                 "responseModalities": ["AUDIO"],
@@ -747,6 +772,13 @@ final class GeminiLiveService: NSObject {
             "outputAudioTranscription": [:],
             "inputAudioTranscription": [:]
         ]
+
+        // Kích hoạt công cụ Google Search Grounding nếu người dùng bật
+        if isGoogleSearchEnabled {
+            setupContent["tools"] = [
+                ["googleSearch": [:]]
+            ]
+        }
 
         let setupDict: [String: Any] = ["setup": setupContent]
         sendJSON(setupDict)
@@ -777,6 +809,12 @@ final class GeminiLiveService: NSObject {
 
         guard let serverContent = json["serverContent"] as? [String: Any] else { return }
 
+        // Kiểm tra & trích xuất dữ liệu Google Search Grounding ở cấp serverContent hoặc json gốc
+        if let groundingMetadata = (serverContent["groundingMetadata"] as? [String: Any])
+            ?? (json["groundingMetadata"] as? [String: Any]) {
+            extractAndNotifyGrounding(from: groundingMetadata)
+        }
+
         if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
@@ -786,6 +824,8 @@ final class GeminiLiveService: NSObject {
                 self.currentUserTranscript = ""
                 self.currentGeminiTranscript = ""
                 self.didReceiveOutputTranscriptionInTurn = false
+                self.currentTurnSearchQueries.removeAll()
+                self.currentTurnSearchSources.removeAll()
                 self.state = self.isMuted ? .muted : .listeningUser
             }
         }
@@ -809,27 +849,32 @@ final class GeminiLiveService: NSObject {
             }
         }
 
-        if let modelTurn = serverContent["modelTurn"] as? [String: Any],
-           let parts = modelTurn["parts"] as? [[String: Any]] {
-            for part in parts {
-                let isThought = (part["thought"] as? Bool) ?? false
-                if !isThought,
-                   !didReceiveOutputTranscriptionInTurn,
-                   let textPart = part["text"] as? String,
-                   !textPart.isEmpty {
-                    currentGeminiTranscript += textPart
-                    let transcript = currentGeminiTranscript
-                    DispatchQueue.main.async { [weak self] in
-                        self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript, isTurnComplete: false)
-                    }
-                }
+        if let modelTurn = serverContent["modelTurn"] as? [String: Any] {
+            if let turnGrounding = modelTurn["groundingMetadata"] as? [String: Any] {
+                extractAndNotifyGrounding(from: turnGrounding)
+            }
 
-                if let inlineData = part["inlineData"] as? [String: Any],
-                   let mimeType = inlineData["mimeType"] as? String,
-                   mimeType.contains("audio/pcm"),
-                   let base64Audio = inlineData["data"] as? String,
-                   let pcmData = Data(base64Encoded: base64Audio) {
-                    enqueuePCM24kAudio(pcmData)
+            if let parts = modelTurn["parts"] as? [[String: Any]] {
+                for part in parts {
+                    let isThought = (part["thought"] as? Bool) ?? false
+                    if !isThought,
+                       !didReceiveOutputTranscriptionInTurn,
+                       let textPart = part["text"] as? String,
+                       !textPart.isEmpty {
+                        currentGeminiTranscript += textPart
+                        let transcript = currentGeminiTranscript
+                        DispatchQueue.main.async { [weak self] in
+                            self?.delegate?.didUpdateTranscript(userText: nil, geminiText: transcript, isTurnComplete: false)
+                        }
+                    }
+
+                    if let inlineData = part["inlineData"] as? [String: Any],
+                       let mimeType = inlineData["mimeType"] as? String,
+                       mimeType.contains("audio/pcm"),
+                       let base64Audio = inlineData["data"] as? String,
+                       let pcmData = Data(base64Encoded: base64Audio) {
+                        enqueuePCM24kAudio(pcmData)
+                    }
                 }
             }
         }
@@ -840,6 +885,8 @@ final class GeminiLiveService: NSObject {
             currentUserTranscript = ""
             currentGeminiTranscript = ""
             didReceiveOutputTranscriptionInTurn = false
+            currentTurnSearchQueries.removeAll()
+            currentTurnSearchSources.removeAll()
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
@@ -850,6 +897,54 @@ final class GeminiLiveService: NSObject {
                     self.resetVADState()
                     self.state = .listeningUser
                 }
+            }
+        }
+    }
+
+    private func extractAndNotifyGrounding(from metadata: [String: Any]) {
+        var didUpdate = false
+
+        if let queries = metadata["webSearchQueries"] as? [String] {
+            for q in queries {
+                let trimmed = q.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && !currentTurnSearchQueries.contains(trimmed) {
+                    currentTurnSearchQueries.append(trimmed)
+                    didUpdate = true
+                }
+            }
+        }
+
+        if let chunks = metadata["groundingChunks"] as? [[String: Any]] {
+            for chunk in chunks {
+                if let web = chunk["web"] as? [String: Any] {
+                    let title = (web["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let uri = (web["uri"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let sourceLabel: String
+                    if !title.isEmpty {
+                        sourceLabel = title
+                    } else if let host = URL(string: uri)?.host {
+                        sourceLabel = host
+                    } else {
+                        sourceLabel = ""
+                    }
+                    if !sourceLabel.isEmpty && !currentTurnSearchSources.contains(sourceLabel) {
+                        currentTurnSearchSources.append(sourceLabel)
+                        didUpdate = true
+                    }
+                }
+            }
+        }
+
+        if !didUpdate && metadata["searchEntryPoint"] != nil && currentTurnSearchQueries.isEmpty {
+            currentTurnSearchQueries.append("Dữ liệu thời gian thực Google")
+            didUpdate = true
+        }
+
+        if didUpdate {
+            let queriesCopy = currentTurnSearchQueries
+            let sourcesCopy = currentTurnSearchSources
+            DispatchQueue.main.async { [weak self] in
+                self?.delegate?.didReceiveGroundingMetadata(queries: queriesCopy, sources: sourcesCopy)
             }
         }
     }
