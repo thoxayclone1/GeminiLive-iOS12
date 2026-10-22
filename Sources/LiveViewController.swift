@@ -39,19 +39,17 @@ final class LiveViewController: UIViewController {
     private let tuningCard = UIView()
     private let tempValueLabel = UILabel()
     private let tempSlider = UISlider()
-    private let lengthSegment = UISegmentedControl(items: ["Ngắn", "Vừa (Mặc định)", "Sâu sắc"])
-    private let vibeSegment = UISegmentedControl(items: ["🔥 Quyến rũ", "💕 Ngọt ngào", "😎 Gen Z", "🍷 Tri kỷ"])
+    private let lengthSegment = UISegmentedControl(items: ["Ngắn (1-2c)", "Vừa (2-4c)", "Chuyên sâu"])
+    private let silenceSegment = UISegmentedControl(items: ["Nhanh (0.65s)", "Chuẩn (0.9s)", "Chậm (1.3s)"])
+    private let vibeListScrollView = UIScrollView()
+    private let vibeListStackView = UIStackView()
+    private var vibeOptionButtons: [UIButton] = []
+    private var pendingSelectedVibe: PersonaVibeStyle = .masterTeacher
 
-    // MARK: - Thanh Thẻ Tương Tác Thân Mật & Gen Z
+    // MARK: - Thanh Thẻ Tương Tác Động theo từng Chế độ (Vibe)
     private let suggestionScrollView = UIScrollView()
     private let suggestionStackView = UIStackView()
-    private let creativePrompts: [(title: String, prompt: String)] = [
-        ("🔥 Trêu anh chút", "Nói gì đó vừa quyến rũ, ngọt ngào vừa hài hước kiểu Gen Z để trêu anh và hỏi thăm xem hôm nay anh thế nào đi, ngắn gọn thôi nhé!"),
-        ("💕 Quan tâm anh đi", "Hôm nay anh hơi mệt một chút, em hãy hỏi han, dỗ dành và tiếp năng lượng cho anh bằng giọng ngọt ngào và cuốn hút nhất đi."),
-        ("😏 Tâm sự mỏng", "Khơi gợi một chủ đề tâm sự vừa thú vị, vừa thân mật và hơi táo bạo một chút để hai đứa mình trò chuyện đi."),
-        ("✨ Gợi ý chill", "Gợi ý nhanh cho anh 1 điều thú vị để làm hoặc thưởng thức ngay lúc này theo phong cách thật chill và tinh tế nhé."),
-        ("📷 Nhìn anh nè", "Nhìn qua camera xem anh hoặc không gian quanh anh đang thế nào, rồi khen hoặc trêu anh một câu thật duyên nhé!")
-    ]
+    private var currentPrompts: [(title: String, prompt: String)] = []
 
     // MARK: - Khung Live Lyric Đa Năng
     private let subtitleContainer = UIView()
@@ -85,6 +83,7 @@ final class LiveViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         liveService.delegate = self
+        pendingSelectedVibe = liveService.personaVibeStyle
         setupBackgroundAndVignettes()
         setupOrbView()
         setupTopBar()
@@ -94,6 +93,8 @@ final class LiveViewController: UIViewController {
         setupTuningOverlay()
         setupLifecycleObservers()
         startDisplayLink()
+        applyOrbThemeForCurrentVibe()
+        reloadSuggestionChipsForCurrentVibe()
         updateUIForState(.disconnected)
         renderLyricContent()
     }
@@ -145,22 +146,14 @@ final class LiveViewController: UIViewController {
             orbContainer.heightAnchor.constraint(equalToConstant: 220)
         ])
 
-        // Phối màu quyến rũ ấm áp hơn: Xanh tím -> Tím trầm -> Hồng san hô
-        let geminiBlue = UIColor(red: 0.35, green: 0.48, blue: 0.96, alpha: 1.0).cgColor
-        let geminiPurple = UIColor(red: 0.68, green: 0.38, blue: 0.82, alpha: 1.0).cgColor
-        let geminiCoral = UIColor(red: 0.92, green: 0.38, blue: 0.52, alpha: 1.0).cgColor
-
-        outerGlowLayer.colors = [geminiBlue, geminiPurple, geminiCoral]
         outerGlowLayer.startPoint = CGPoint(x: 0, y: 0)
         outerGlowLayer.endPoint = CGPoint(x: 1, y: 1)
         outerGlowLayer.opacity = 0.38
 
-        middleOrbLayer.colors = [geminiPurple, geminiCoral, geminiBlue]
         middleOrbLayer.startPoint = CGPoint(x: 1, y: 0)
         middleOrbLayer.endPoint = CGPoint(x: 0, y: 1)
         middleOrbLayer.opacity = 0.68
 
-        innerCoreLayer.colors = [geminiCoral, geminiPurple, geminiBlue]
         innerCoreLayer.startPoint = CGPoint(x: 0, y: 0.5)
         innerCoreLayer.endPoint = CGPoint(x: 1, y: 0.5)
         innerCoreLayer.opacity = 0.95
@@ -170,7 +163,7 @@ final class LiveViewController: UIViewController {
         orbContainer.layer.addSublayer(innerCoreLayer)
 
         orbHintLabel.translatesAutoresizingMaskIntoConstraints = false
-        orbHintLabel.textColor = UIColor.white.withAlphaComponent(0.92)
+        orbHintLabel.textColor = UIColor.white.withAlphaComponent(0.94)
         orbHintLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
         orbHintLabel.textAlignment = .center
         orbHintLabel.numberOfLines = 2
@@ -179,11 +172,34 @@ final class LiveViewController: UIViewController {
         NSLayoutConstraint.activate([
             orbHintLabel.centerXAnchor.constraint(equalTo: orbContainer.centerXAnchor),
             orbHintLabel.centerYAnchor.constraint(equalTo: orbContainer.centerYAnchor),
-            orbHintLabel.widthAnchor.constraint(equalToConstant: 155)
+            orbHintLabel.widthAnchor.constraint(equalToConstant: 160)
         ])
 
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleOrbTap))
         orbContainer.addGestureRecognizer(tapGesture)
+    }
+
+    private func applyOrbThemeForCurrentVibe() {
+        let isGrowth = liveService.personaVibeStyle.isGrowthOrKnowledgeMode
+        if isGrowth {
+            // Tông màu Trí tuệ & Kỷ luật: Xanh Dương Sắc Bén -> Tím Indigo -> Xanh Ngọc Lục Bảo
+            let primaryBlue = UIColor(red: 0.18, green: 0.56, blue: 0.98, alpha: 1.0).cgColor
+            let deepIndigo = UIColor(red: 0.42, green: 0.34, blue: 0.92, alpha: 1.0).cgColor
+            let energeticCyan = UIColor(red: 0.12, green: 0.80, blue: 0.76, alpha: 1.0).cgColor
+
+            outerGlowLayer.colors = [primaryBlue, deepIndigo, energeticCyan]
+            middleOrbLayer.colors = [deepIndigo, energeticCyan, primaryBlue]
+            innerCoreLayer.colors = [energeticCyan, primaryBlue, deepIndigo]
+        } else {
+            // Tông màu Thư giãn & Tâm sự: Xanh tím -> Tím trầm -> Hồng san hô
+            let geminiBlue = UIColor(red: 0.35, green: 0.48, blue: 0.96, alpha: 1.0).cgColor
+            let geminiPurple = UIColor(red: 0.68, green: 0.38, blue: 0.82, alpha: 1.0).cgColor
+            let geminiCoral = UIColor(red: 0.92, green: 0.38, blue: 0.52, alpha: 1.0).cgColor
+
+            outerGlowLayer.colors = [geminiBlue, geminiPurple, geminiCoral]
+            middleOrbLayer.colors = [geminiPurple, geminiCoral, geminiBlue]
+            innerCoreLayer.colors = [geminiCoral, geminiPurple, geminiBlue]
+        }
     }
 
     private func layoutOrbLayers() {
@@ -213,6 +229,8 @@ final class LiveViewController: UIViewController {
         statusBadge.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         statusBadge.setTitleColor(.white, for: .normal)
         statusBadge.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+        statusBadge.titleLabel?.lineBreakMode = .byTruncatingTail
+        statusBadge.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusBadge.isUserInteractionEnabled = false
         view.addSubview(statusBadge)
 
@@ -223,19 +241,20 @@ final class LiveViewController: UIViewController {
         settingsButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
         settingsButton.layer.cornerRadius = 15
         settingsButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
+        settingsButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         settingsButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
         view.addSubview(settingsButton)
 
-        // Nút mở Bảng Điều Chỉnh Độ dài & Độ sáng tạo
         tuningButton.translatesAutoresizingMaskIntoConstraints = false
-        tuningButton.setTitle("🎛️ Độ dài & Vibe", for: .normal)
+        tuningButton.setTitle("🎛️ Chế độ & Vibe", for: .normal)
         tuningButton.setTitleColor(.white, for: .normal)
         tuningButton.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-        tuningButton.backgroundColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 0.38)
+        tuningButton.backgroundColor = UIColor(red: 0.25, green: 0.52, blue: 0.95, alpha: 0.42)
         tuningButton.layer.cornerRadius = 15
         tuningButton.layer.borderWidth = 1
-        tuningButton.layer.borderColor = UIColor(red: 0.95, green: 0.50, blue: 0.65, alpha: 0.55).cgColor
+        tuningButton.layer.borderColor = UIColor(red: 0.45, green: 0.70, blue: 1.0, alpha: 0.65).cgColor
         tuningButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        tuningButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         tuningButton.addTarget(self, action: #selector(showTuningPanel), for: .touchUpInside)
         view.addSubview(tuningButton)
 
@@ -246,6 +265,7 @@ final class LiveViewController: UIViewController {
         voiceButton.backgroundColor = UIColor(red: 0.61, green: 0.45, blue: 0.80, alpha: 0.35)
         voiceButton.layer.cornerRadius = 15
         voiceButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
+        voiceButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         voiceButton.addTarget(self, action: #selector(openFemaleVoicePicker), for: .touchUpInside)
         view.addSubview(voiceButton)
 
@@ -264,6 +284,7 @@ final class LiveViewController: UIViewController {
         NSLayoutConstraint.activate([
             statusBadge.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             statusBadge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            statusBadge.trailingAnchor.constraint(lessThanOrEqualTo: voiceButton.leadingAnchor, constant: -6),
 
             settingsButton.centerYAnchor.constraint(equalTo: statusBadge.centerYAnchor),
             settingsButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -279,48 +300,108 @@ final class LiveViewController: UIViewController {
         ])
     }
 
-    // MARK: - Bảng Điều Chỉnh Thông Số (Độ dài, Độ sáng tạo, Vibe)
+    // MARK: - Bảng Điều Chỉnh Thông Số (Độ dài, Tự ngắt Mic, Sáng tạo & 10 Chế độ Vibe)
 
     private func setupTuningOverlay() {
         tuningOverlay.translatesAutoresizingMaskIntoConstraints = false
-        tuningOverlay.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        tuningOverlay.backgroundColor = UIColor.black.withAlphaComponent(0.72)
         tuningOverlay.isHidden = true
         view.addSubview(tuningOverlay)
 
         tuningCard.translatesAutoresizingMaskIntoConstraints = false
-        tuningCard.backgroundColor = UIColor(red: 18/255, green: 20/255, blue: 34/255, alpha: 0.98)
+        tuningCard.backgroundColor = UIColor(red: 16/255, green: 19/255, blue: 32/255, alpha: 0.98)
         tuningCard.layer.cornerRadius = 22
         tuningCard.layer.borderWidth = 1
         tuningCard.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
         tuningOverlay.addSubview(tuningCard)
 
         let titleLabel = UILabel()
-        titleLabel.text = "🎛️ Điều chỉnh Độ dài, Sáng tạo & Vibe"
+        titleLabel.text = "🎛️ Cài đặt Huấn luyện, Độ dài & Ngắt Mic"
         titleLabel.font = UIFont.systemFont(ofSize: 15, weight: .bold)
         titleLabel.textColor = .white
         titleLabel.textAlignment = .center
 
-        // 1. Độ dài câu trả lời
+        // 1. Chọn Phong cách / Chế độ (10 chế độ cuộn mượt mà)
+        let vibeTitle = UILabel()
+        vibeTitle.text = "🧠 Chọn Chế độ Huấn luyện / Phong cách nói:"
+        vibeTitle.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        vibeTitle.textColor = UIColor(white: 0.90, alpha: 1.0)
+
+        vibeListScrollView.translatesAutoresizingMaskIntoConstraints = false
+        vibeListScrollView.showsVerticalScrollIndicator = true
+        vibeListScrollView.indicatorStyle = .white
+        vibeListScrollView.backgroundColor = UIColor.black.withAlphaComponent(0.25)
+        vibeListScrollView.layer.cornerRadius = 14
+        vibeListScrollView.layer.borderWidth = 1
+        vibeListScrollView.layer.borderColor = UIColor.white.withAlphaComponent(0.1).cgColor
+
+        vibeListStackView.translatesAutoresizingMaskIntoConstraints = false
+        vibeListStackView.axis = .vertical
+        vibeListStackView.spacing = 6
+        vibeListScrollView.addSubview(vibeListStackView)
+
+        vibeOptionButtons.removeAll()
+        for style in PersonaVibeStyle.allCases {
+            let btn = UIButton(type: .system)
+            btn.tag = style.rawValue
+            btn.contentHorizontalAlignment = .left
+            btn.titleLabel?.numberOfLines = 2
+            btn.contentEdgeInsets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+            btn.layer.cornerRadius = 10
+            btn.layer.borderWidth = 1
+
+            let titleAttr = NSMutableAttributedString(
+                string: "\(style.title)\n",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+                    .foregroundColor: UIColor.white
+                ]
+            )
+            let descAttr = NSAttributedString(
+                string: style.subtitleDescription,
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 11, weight: .regular),
+                    .foregroundColor: UIColor(white: 0.78, alpha: 1.0)
+                ]
+            )
+            titleAttr.append(descAttr)
+            btn.setAttributedTitle(titleAttr, for: .normal)
+            btn.addTarget(self, action: #selector(handleVibeOptionTapped(_:)), for: .touchUpInside)
+            vibeListStackView.addArrangedSubview(btn)
+            vibeOptionButtons.append(btn)
+        }
+        refreshVibeSelectionHighlight()
+
+        // 2. Độ dài câu trả lời
         let lengthTitle = UILabel()
-        lengthTitle.text = "📏 Độ dài câu trả lời của em:"
-        lengthTitle.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
-        lengthTitle.textColor = UIColor(white: 0.88, alpha: 1.0)
+        lengthTitle.text = "📏 Độ dài câu trả lời / bài giảng:"
+        lengthTitle.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        lengthTitle.textColor = UIColor(white: 0.90, alpha: 1.0)
 
         lengthSegment.selectedSegmentIndex = liveService.responseLengthStyle.rawValue
         styleSegmentedControl(lengthSegment)
 
-        // 2. Thanh trượt Độ sáng tạo (Temperature)
+        // 3. Độ nhạy tự động ngắt Mic (khi ở chế độ ⚡ Tự động)
+        let silenceTitle = UILabel()
+        silenceTitle.text = "⏱️ Tự động ngắt Mic sau khi bạn ngừng nói:"
+        silenceTitle.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        silenceTitle.textColor = UIColor(white: 0.90, alpha: 1.0)
+
+        silenceSegment.selectedSegmentIndex = liveService.autoSilenceTimeoutStyle.rawValue
+        styleSegmentedControl(silenceSegment)
+
+        // 4. Thanh trượt Độ sáng tạo (Temperature)
         let tempRow = UIStackView()
         tempRow.axis = .horizontal
         tempRow.distribution = .equalSpacing
 
         let tempTitle = UILabel()
-        tempTitle.text = "✨ Độ sáng tạo & Bay bổng:"
-        tempTitle.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
-        tempTitle.textColor = UIColor(white: 0.88, alpha: 1.0)
+        tempTitle.text = "✨ Độ chuẩn xác / Sáng tạo:"
+        tempTitle.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        tempTitle.textColor = UIColor(white: 0.90, alpha: 1.0)
 
-        tempValueLabel.font = UIFont.systemFont(ofSize: 13, weight: .bold)
-        tempValueLabel.textColor = UIColor(red: 0.95, green: 0.55, blue: 0.70, alpha: 1.0)
+        tempValueLabel.font = UIFont.systemFont(ofSize: 12, weight: .bold)
+        tempValueLabel.textColor = UIColor(red: 0.45, green: 0.78, blue: 1.0, alpha: 1.0)
         updateTempLabelText(liveService.creativityTemperature)
 
         tempRow.addArrangedSubview(tempTitle)
@@ -329,23 +410,8 @@ final class LiveViewController: UIViewController {
         tempSlider.minimumValue = 0.3
         tempSlider.maximumValue = 1.2
         tempSlider.value = liveService.creativityTemperature
-        tempSlider.minimumTrackTintColor = UIColor(red: 0.90, green: 0.42, blue: 0.58, alpha: 1.0)
+        tempSlider.minimumTrackTintColor = UIColor(red: 0.25, green: 0.56, blue: 0.96, alpha: 1.0)
         tempSlider.addTarget(self, action: #selector(handleTempSliderChanged(_:)), for: .valueChanged)
-
-        let tempHint = UILabel()
-        tempHint.text = "0.5: Thực tế, gọn • 0.75: Tự nhiên (Mặc định) • 1.0+: Rất bay bổng"
-        tempHint.font = UIFont.systemFont(ofSize: 11, weight: .regular)
-        tempHint.textColor = UIColor(white: 0.6, alpha: 1.0)
-        tempHint.textAlignment = .center
-
-        // 3. Phong cách (Vibe)
-        let vibeTitle = UILabel()
-        vibeTitle.text = "💃 Phong cách nói chuyện (Vibe):"
-        vibeTitle.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
-        vibeTitle.textColor = UIColor(white: 0.88, alpha: 1.0)
-
-        vibeSegment.selectedSegmentIndex = liveService.personaVibeStyle.rawValue
-        styleSegmentedControl(vibeSegment)
 
         // Nút Lưu & Đóng
         let btnRow = UIStackView()
@@ -365,7 +431,7 @@ final class LiveViewController: UIViewController {
         applyBtn.setTitle("Lưu & Áp dụng ngay", for: .normal)
         applyBtn.setTitleColor(.white, for: .normal)
         applyBtn.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
-        applyBtn.backgroundColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 1.0)
+        applyBtn.backgroundColor = UIColor(red: 0.22, green: 0.52, blue: 0.95, alpha: 1.0)
         applyBtn.layer.cornerRadius = 14
         applyBtn.addTarget(self, action: #selector(applyTuningChanges), for: .touchUpInside)
 
@@ -374,18 +440,19 @@ final class LiveViewController: UIViewController {
 
         let mainStack = UIStackView(arrangedSubviews: [
             titleLabel,
+            vibeTitle,
+            vibeListScrollView,
             lengthTitle,
             lengthSegment,
+            silenceTitle,
+            silenceSegment,
             tempRow,
             tempSlider,
-            tempHint,
-            vibeTitle,
-            vibeSegment,
             btnRow
         ])
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         mainStack.axis = .vertical
-        mainStack.spacing = 11
+        mainStack.spacing = 9
         tuningCard.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
@@ -396,22 +463,43 @@ final class LiveViewController: UIViewController {
 
             tuningCard.centerXAnchor.constraint(equalTo: tuningOverlay.centerXAnchor),
             tuningCard.centerYAnchor.constraint(equalTo: tuningOverlay.centerYAnchor),
-            tuningCard.leadingAnchor.constraint(equalTo: tuningOverlay.leadingAnchor, constant: 20),
-            tuningCard.trailingAnchor.constraint(equalTo: tuningOverlay.trailingAnchor, constant: -20),
+            tuningCard.leadingAnchor.constraint(equalTo: tuningOverlay.leadingAnchor, constant: 16),
+            tuningCard.trailingAnchor.constraint(equalTo: tuningOverlay.trailingAnchor, constant: -16),
 
-            mainStack.topAnchor.constraint(equalTo: tuningCard.topAnchor, constant: 18),
-            mainStack.bottomAnchor.constraint(equalTo: tuningCard.bottomAnchor, constant: -18),
-            mainStack.leadingAnchor.constraint(equalTo: tuningCard.leadingAnchor, constant: 16),
-            mainStack.trailingAnchor.constraint(equalTo: tuningCard.trailingAnchor, constant: -16),
+            mainStack.topAnchor.constraint(equalTo: tuningCard.topAnchor, constant: 16),
+            mainStack.bottomAnchor.constraint(equalTo: tuningCard.bottomAnchor, constant: -16),
+            mainStack.leadingAnchor.constraint(equalTo: tuningCard.leadingAnchor, constant: 14),
+            mainStack.trailingAnchor.constraint(equalTo: tuningCard.trailingAnchor, constant: -14),
+
+            vibeListScrollView.heightAnchor.constraint(equalToConstant: 215),
+
+            vibeListStackView.topAnchor.constraint(equalTo: vibeListScrollView.topAnchor, constant: 8),
+            vibeListStackView.bottomAnchor.constraint(equalTo: vibeListScrollView.bottomAnchor, constant: -8),
+            vibeListStackView.leadingAnchor.constraint(equalTo: vibeListScrollView.leadingAnchor, constant: 8),
+            vibeListStackView.trailingAnchor.constraint(equalTo: vibeListScrollView.trailingAnchor, constant: -8),
+            vibeListStackView.widthAnchor.constraint(equalTo: vibeListScrollView.widthAnchor, constant: -16),
 
             btnRow.heightAnchor.constraint(equalToConstant: 42)
         ])
     }
 
+    private func refreshVibeSelectionHighlight() {
+        for btn in vibeOptionButtons {
+            let isSelected = (btn.tag == pendingSelectedVibe.rawValue)
+            if isSelected {
+                btn.backgroundColor = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 0.42)
+                btn.layer.borderColor = UIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 0.95).cgColor
+            } else {
+                btn.backgroundColor = UIColor.white.withAlphaComponent(0.05)
+                btn.layer.borderColor = UIColor.white.withAlphaComponent(0.08).cgColor
+            }
+        }
+    }
+
     private func styleSegmentedControl(_ control: UISegmentedControl) {
-        control.tintColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 1.0)
+        control.tintColor = UIColor(red: 0.25, green: 0.55, blue: 0.95, alpha: 1.0)
         if #available(iOS 13.0, *) {
-            control.selectedSegmentTintColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 0.85)
+            control.selectedSegmentTintColor = UIColor(red: 0.25, green: 0.55, blue: 0.95, alpha: 0.85)
         }
         let normalAttr: [NSAttributedString.Key: Any] = [
             .foregroundColor: UIColor(white: 0.85, alpha: 1.0),
@@ -429,16 +517,16 @@ final class LiveViewController: UIViewController {
         let formatted = String(format: "%.2f", val)
         let desc: String
         if val < 0.6 {
-            desc = "Gọn & Thực tế"
+            desc = "Chuẩn xác & Logic"
         } else if val <= 0.82 {
-            desc = "Vừa đẹp"
+            desc = "Cân bằng"
         } else {
-            desc = "Bay bổng"
+            desc = "Sáng tạo cao"
         }
         tempValueLabel.text = "\(formatted) (\(desc))"
     }
 
-    // MARK: - Khung Live Lyric
+    // MARK: - Khung Live Lyric (Đã sửa triệt để lỗi đè chữ lên 3 nút Xóa / Chép / Mở rộng)
 
     private func setupSubtitleBox() {
         subtitleContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -454,19 +542,25 @@ final class LiveViewController: UIViewController {
         subtitleContainer.addSubview(lyricHeaderBar)
 
         lyricTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        lyricTitleLabel.text = "💬 Live Lyric • \(liveService.personaVibeStyle.title)"
         lyricTitleLabel.font = UIFont.systemFont(ofSize: 11, weight: .bold)
-        lyricTitleLabel.textColor = UIColor(red: 0.95, green: 0.68, blue: 0.80, alpha: 1.0)
+        lyricTitleLabel.textColor = UIColor(red: 0.65, green: 0.82, blue: 1.0, alpha: 1.0)
+        lyricTitleLabel.lineBreakMode = .byTruncatingTail
+        lyricTitleLabel.numberOfLines = 1
+        // Ưu tiên co giãn thấp hơn cụm nút bên phải để không bao giờ đè lên nút
+        lyricTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        lyricTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         lyricHeaderBar.addSubview(lyricTitleLabel)
 
-        configureHeaderActionButton(expandLyricButton, title: "🔍 Mở rộng", action: #selector(toggleLyricExpand))
-        configureHeaderActionButton(copyLyricButton, title: "📋 Chép", action: #selector(copyLyricText))
         configureHeaderActionButton(clearLyricButton, title: "🗑️ Xóa", action: #selector(clearLyricHistory))
+        configureHeaderActionButton(copyLyricButton, title: "📋 Chép", action: #selector(copyLyricText))
+        configureHeaderActionButton(expandLyricButton, title: "🔍 Mở rộng", action: #selector(toggleLyricExpand))
 
         let headerButtonsStack = UIStackView(arrangedSubviews: [clearLyricButton, copyLyricButton, expandLyricButton])
         headerButtonsStack.translatesAutoresizingMaskIntoConstraints = false
         headerButtonsStack.axis = .horizontal
-        headerButtonsStack.spacing = 6
+        headerButtonsStack.spacing = 5
+        headerButtonsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        headerButtonsStack.setContentHuggingPriority(.required, for: .horizontal)
         lyricHeaderBar.addSubview(headerButtonsStack)
 
         lyricTextView.translatesAutoresizingMaskIntoConstraints = false
@@ -480,7 +574,7 @@ final class LiveViewController: UIViewController {
 
         toggleSubButton.translatesAutoresizingMaskIntoConstraints = false
         toggleSubButton.setTitle("👁️ Ẩn khung chữ", for: .normal)
-        toggleSubButton.setTitleColor(UIColor(white: 0.75, alpha: 1.0), for: .normal)
+        toggleSubButton.setTitleColor(UIColor(white: 0.78, alpha: 1.0), for: .normal)
         toggleSubButton.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
         toggleSubButton.addTarget(self, action: #selector(toggleSubtitleBox), for: .touchUpInside)
         view.addSubview(toggleSubButton)
@@ -497,10 +591,11 @@ final class LiveViewController: UIViewController {
             lyricHeaderBar.topAnchor.constraint(equalTo: subtitleContainer.topAnchor),
             lyricHeaderBar.leadingAnchor.constraint(equalTo: subtitleContainer.leadingAnchor),
             lyricHeaderBar.trailingAnchor.constraint(equalTo: subtitleContainer.trailingAnchor),
-            lyricHeaderBar.heightAnchor.constraint(equalToConstant: 32),
+            lyricHeaderBar.heightAnchor.constraint(equalToConstant: 34),
 
             lyricTitleLabel.leadingAnchor.constraint(equalTo: lyricHeaderBar.leadingAnchor, constant: 12),
             lyricTitleLabel.centerYAnchor.constraint(equalTo: lyricHeaderBar.centerYAnchor),
+            lyricTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerButtonsStack.leadingAnchor, constant: -8),
 
             headerButtonsStack.trailingAnchor.constraint(equalTo: lyricHeaderBar.trailingAnchor, constant: -10),
             headerButtonsStack.centerYAnchor.constraint(equalTo: lyricHeaderBar.centerYAnchor),
@@ -517,15 +612,17 @@ final class LiveViewController: UIViewController {
 
     private func configureHeaderActionButton(_ button: UIButton, title: String, action: Selector) {
         button.setTitle(title, for: .normal)
-        button.setTitleColor(UIColor(white: 0.9, alpha: 1.0), for: .normal)
+        button.setTitleColor(UIColor(white: 0.92, alpha: 1.0), for: .normal)
         button.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-        button.backgroundColor = UIColor.white.withAlphaComponent(0.1)
+        button.backgroundColor = UIColor.white.withAlphaComponent(0.12)
         button.layer.cornerRadius = 8
-        button.contentEdgeInsets = UIEdgeInsets(top: 3, left: 7, bottom: 3, right: 7)
+        button.contentEdgeInsets = UIEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .horizontal)
         button.addTarget(self, action: action, for: .touchUpInside)
     }
 
-    // MARK: - Thanh Thẻ Tương Tác Thân Mật
+    // MARK: - Thanh Thẻ Tương Tác Động theo từng Chế độ
 
     private func setupCreativeSuggestionsBar() {
         suggestionScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -536,21 +633,6 @@ final class LiveViewController: UIViewController {
         suggestionStackView.axis = .horizontal
         suggestionStackView.spacing = 8
         suggestionScrollView.addSubview(suggestionStackView)
-
-        for (index, item) in creativePrompts.enumerated() {
-            let chip = UIButton(type: .system)
-            chip.tag = index
-            chip.setTitle(item.title, for: .normal)
-            chip.setTitleColor(.white, for: .normal)
-            chip.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
-            chip.backgroundColor = UIColor(red: 0.45, green: 0.25, blue: 0.48, alpha: 0.58)
-            chip.layer.cornerRadius = 15
-            chip.layer.borderWidth = 1
-            chip.layer.borderColor = UIColor(red: 0.90, green: 0.45, blue: 0.62, alpha: 0.5).cgColor
-            chip.contentEdgeInsets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
-            chip.addTarget(self, action: #selector(handleCreativeChipTap(_:)), for: .touchUpInside)
-            suggestionStackView.addArrangedSubview(chip)
-        }
 
         NSLayoutConstraint.activate([
             suggestionScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -566,6 +648,36 @@ final class LiveViewController: UIViewController {
         ])
     }
 
+    private func reloadSuggestionChipsForCurrentVibe() {
+        for subview in suggestionStackView.arrangedSubviews {
+            suggestionStackView.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
+
+        let vibe = liveService.personaVibeStyle
+        currentPrompts = vibe.quickActionPrompts
+        let isGrowth = vibe.isGrowthOrKnowledgeMode
+
+        for (index, item) in currentPrompts.enumerated() {
+            let chip = UIButton(type: .system)
+            chip.tag = index
+            chip.setTitle(item.title, for: .normal)
+            chip.setTitleColor(.white, for: .normal)
+            chip.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+            chip.backgroundColor = isGrowth
+                ? UIColor(red: 0.16, green: 0.36, blue: 0.65, alpha: 0.65)
+                : UIColor(red: 0.45, green: 0.25, blue: 0.48, alpha: 0.58)
+            chip.layer.cornerRadius = 15
+            chip.layer.borderWidth = 1
+            chip.layer.borderColor = isGrowth
+                ? UIColor(red: 0.38, green: 0.68, blue: 1.0, alpha: 0.55).cgColor
+                : UIColor(red: 0.90, green: 0.45, blue: 0.62, alpha: 0.5).cgColor
+            chip.contentEdgeInsets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+            chip.addTarget(self, action: #selector(handleCreativeChipTap(_:)), for: .touchUpInside)
+            suggestionStackView.addArrangedSubview(chip)
+        }
+    }
+
     private func setupFloatingPillBar() {
         pillBar.translatesAutoresizingMaskIntoConstraints = false
         pillBar.backgroundColor = UIColor(red: 20/255, green: 22/255, blue: 34/255, alpha: 0.95)
@@ -579,7 +691,7 @@ final class LiveViewController: UIViewController {
         configurePillButton(modeButton, title: initialModeTitle, action: #selector(handleModeTap))
         configurePillButton(camButton, title: "📷 Cam", action: #selector(handleCamTap))
         configurePillButton(powerButton, title: "▶️ Bắt đầu", action: #selector(handlePowerTap))
-        powerButton.backgroundColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 1.0)
+        powerButton.backgroundColor = UIColor(red: 0.22, green: 0.52, blue: 0.95, alpha: 1.0)
 
         let stack = UIStackView(arrangedSubviews: [micButton, modeButton, camButton, powerButton])
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -613,7 +725,8 @@ final class LiveViewController: UIViewController {
     // MARK: - Hiển thị & Tự động cuộn Live Lyric
 
     private func renderLyricContent() {
-        lyricTitleLabel.text = "💬 Live Lyric • \(liveService.personaVibeStyle.title) • \(liveService.responseLengthStyle.title)"
+        let vibe = liveService.personaVibeStyle
+        lyricTitleLabel.text = "💬 \(vibe.shortTitle) • \(liveService.responseLengthStyle.shortTitle)"
 
         let attributed = NSMutableAttributedString()
         let paragraphStyle = NSMutableParagraphStyle()
@@ -630,9 +743,12 @@ final class LiveViewController: UIViewController {
             .foregroundColor: UIColor(white: 0.85, alpha: 1.0),
             .paragraphStyle: paragraphStyle
         ]
+        let geminiHeaderColor = vibe.isGrowthOrKnowledgeMode
+            ? UIColor(red: 0.35, green: 0.85, blue: 0.78, alpha: 1.0)
+            : UIColor(red: 0.96, green: 0.52, blue: 0.68, alpha: 1.0)
         let geminiHeaderAttributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 13, weight: .bold),
-            .foregroundColor: UIColor(red: 0.96, green: 0.52, blue: 0.68, alpha: 1.0),
+            .foregroundColor: geminiHeaderColor,
             .paragraphStyle: paragraphStyle
         ]
         let geminiHistoryAttributes: [NSAttributedString.Key: Any] = [
@@ -647,15 +763,17 @@ final class LiveViewController: UIViewController {
         ]
 
         if conversationHistory.isEmpty && activeUserStreamingText.isEmpty && activeGeminiStreamingText.isEmpty {
-            let tempStr = String(format: "%.2f", liveService.creativityTemperature)
+            let modeAutoDesc = liveService.isManualTurnMode
+                ? "Thủ công (Chạm quả cầu khi nói xong)"
+                : "Tự động ngắt mic sau \(liveService.autoSilenceTimeoutStyle.title)"
             let welcome = NSAttributedString(
-                string: "💕 Chào anh! Em đang ở chế độ \(liveService.personaVibeStyle.title) (Giọng \(liveService.voiceName), độ dài: \(liveService.responseLengthStyle.title), sáng tạo: \(tempStr)).\nAnh nhấn ▶️ Bắt đầu để tâm sự với em hoặc bấm 🎛️ ở trên để chỉnh độ dài câu nói nhé!",
+                string: "🎯 Chế độ hiện tại: \(vibe.title) — \(vibe.subtitleDescription).\n• Giọng: \(liveService.voiceName) | Độ dài: \(liveService.responseLengthStyle.title) | Mic: \(modeAutoDesc).\n👉 Nhấn ▶️ Bắt đầu để đàm thoại hoặc bấm '🎛️ Chế độ & Vibe' ở góc trên để đổi phong cách rèn luyện!",
                 attributes: geminiHistoryAttributes
             )
             attributed.append(welcome)
         } else {
             for item in conversationHistory.suffix(12) {
-                let header = item.isGemini ? "👩 Em (\(liveService.voiceName)): " : "🗣️ Anh: "
+                let header = item.isGemini ? "\(vibe.speakerDisplayName) (\(liveService.voiceName)): " : "🗣️ Bạn: "
                 let headerAttr = item.isGemini ? geminiHeaderAttributes : userHeaderAttributes
                 let bodyAttr = item.isGemini ? geminiHistoryAttributes : userBodyAttributes
 
@@ -664,12 +782,13 @@ final class LiveViewController: UIViewController {
             }
 
             if !activeUserStreamingText.isEmpty {
-                attributed.append(NSAttributedString(string: "🗣️ Anh (đang nói): ", attributes: userHeaderAttributes))
+                attributed.append(NSAttributedString(string: "🗣️ Bạn (đang nói): ", attributes: userHeaderAttributes))
                 attributed.append(NSAttributedString(string: "\(activeUserStreamingText)\n", attributes: userBodyAttributes))
             }
 
             if !activeGeminiStreamingText.isEmpty {
-                attributed.append(NSAttributedString(string: "👩 Em (đang thủ thỉ): ", attributes: geminiHeaderAttributes))
+                let actionVerb = vibe.isGrowthOrKnowledgeMode ? "đang phân tích" : "đang chia sẻ"
+                attributed.append(NSAttributedString(string: "\(vibe.speakerDisplayName) (\(actionVerb)): ", attributes: geminiHeaderAttributes))
                 attributed.append(NSAttributedString(string: "\(activeGeminiStreamingText)\n", attributes: geminiLiveActiveAttributes))
             }
         }
@@ -715,15 +834,24 @@ final class LiveViewController: UIViewController {
     // MARK: - Xử lý Nút bấm & Bảng Điều Chỉnh
 
     @objc private func showTuningPanel() {
+        pendingSelectedVibe = liveService.personaVibeStyle
+        refreshVibeSelectionHighlight()
         tempSlider.value = liveService.creativityTemperature
         updateTempLabelText(liveService.creativityTemperature)
         lengthSegment.selectedSegmentIndex = liveService.responseLengthStyle.rawValue
-        vibeSegment.selectedSegmentIndex = liveService.personaVibeStyle.rawValue
+        silenceSegment.selectedSegmentIndex = liveService.autoSilenceTimeoutStyle.rawValue
         tuningOverlay.isHidden = false
     }
 
     @objc private func hideTuningPanel() {
         tuningOverlay.isHidden = true
+    }
+
+    @objc private func handleVibeOptionTapped(_ sender: UIButton) {
+        guard let selected = PersonaVibeStyle(rawValue: sender.tag) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        pendingSelectedVibe = selected
+        refreshVibeSelectionHighlight()
     }
 
     @objc private func handleTempSliderChanged(_ sender: UISlider) {
@@ -733,15 +861,18 @@ final class LiveViewController: UIViewController {
     }
 
     @objc private func applyTuningChanges() {
+        liveService.personaVibeStyle = pendingSelectedVibe
         liveService.creativityTemperature = tempSlider.value
         if let length = ResponseLengthStyle(rawValue: lengthSegment.selectedSegmentIndex) {
             liveService.responseLengthStyle = length
         }
-        if let vibe = PersonaVibeStyle(rawValue: vibeSegment.selectedSegmentIndex) {
-            liveService.personaVibeStyle = vibe
+        if let silence = AutoSilenceTimeoutStyle(rawValue: silenceSegment.selectedSegmentIndex) {
+            liveService.autoSilenceTimeoutStyle = silence
         }
 
         tuningOverlay.isHidden = true
+        applyOrbThemeForCurrentVibe()
+        reloadSuggestionChipsForCurrentVibe()
         renderLyricContent()
 
         if liveService.state != .disconnected {
@@ -761,8 +892,8 @@ final class LiveViewController: UIViewController {
     @objc private func handleCreativeChipTap(_ sender: UIButton) {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let index = sender.tag
-        guard index >= 0 && index < creativePrompts.count else { return }
-        let selected = creativePrompts[index]
+        guard index >= 0 && index < currentPrompts.count else { return }
+        let selected = currentPrompts[index]
         liveService.sendCreativePrompt(selected.prompt)
     }
 
@@ -795,8 +926,8 @@ final class LiveViewController: UIViewController {
 
     @objc private func openFemaleVoicePicker() {
         let sheet = UIAlertController(
-            title: "👩 Chọn Giọng Nữ cho Em",
-            message: "Kết hợp cùng Vibe \(liveService.personaVibeStyle.title) để có giọng điệu tự nhiên, gợi cảm nhất.",
+            title: "👩 Chọn Giọng Trợ Lý / Mentor",
+            message: "Đang kết hợp cùng chế độ: \(liveService.personaVibeStyle.title)",
             preferredStyle: .actionSheet
         )
 
@@ -836,6 +967,7 @@ final class LiveViewController: UIViewController {
         let isManual = liveService.isManualTurnMode
         modeButton.setTitle(isManual ? "✋ Thủ công" : "⚡ Tự động", for: .normal)
         updateUIForState(liveService.state)
+        renderLyricContent()
     }
 
     @objc private func handleCamTap() {
@@ -844,7 +976,7 @@ final class LiveViewController: UIViewController {
             startCamera()
             previewLayer?.isHidden = false
             flipCamButton.isHidden = false
-            camButton.backgroundColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 0.75)
+            camButton.backgroundColor = UIColor(red: 0.22, green: 0.52, blue: 0.95, alpha: 0.78)
         } else {
             stopCamera()
             previewLayer?.isHidden = true
@@ -878,7 +1010,7 @@ final class LiveViewController: UIViewController {
     @objc private func openSettings() {
         let alert = UIAlertController(
             title: "⚙️ Cài đặt API & Yêu cầu riêng",
-            message: "Để chỉnh Độ dài, Độ sáng tạo và Vibe nhanh, hãy bấm nút '🎛️ Độ dài & Vibe' trên màn hình chính.",
+            message: "Để đổi Chế độ (Nghiêm khắc, Dạy học, Khoa học, Phê bình...) hãy bấm nút '🎛️ Chế độ & Vibe' trên màn hình chính.",
             preferredStyle: .alert
         )
         alert.addTextField { tf in
@@ -896,7 +1028,7 @@ final class LiveViewController: UIViewController {
             tf.autocapitalizationType = .none
         }
         alert.addTextField { tf in
-            tf.placeholder = "Ghi chú riêng cho em (VD: Gọi anh là Tuấn, thích trêu ghẹo...)"
+            tf.placeholder = "Ghi chú riêng (VD: Tôi học CNTT, thích ví dụ thực tế...)"
             tf.text = self.liveService.customExtraPrompt
             tf.clearButtonMode = .whileEditing
         }
@@ -918,30 +1050,38 @@ final class LiveViewController: UIViewController {
 
     private func updateUIForState(_ state: LiveState) {
         let modeText = liveService.isManualTurnMode ? "Thủ công" : "Tự động"
+        let speaker = liveService.personaVibeStyle.speakerDisplayName
         switch state {
         case .disconnected:
             statusBadge.setTitle("⚪️ Chưa kết nối", for: .normal)
-            orbHintLabel.text = "Chạm để\nTrò chuyện"
+            orbHintLabel.text = "Chạm để\nBắt đầu"
             powerButton.setTitle("▶️ Bắt đầu", for: .normal)
-            powerButton.backgroundColor = UIColor(red: 0.88, green: 0.36, blue: 0.52, alpha: 1.0)
+            powerButton.backgroundColor = UIColor(red: 0.22, green: 0.52, blue: 0.95, alpha: 1.0)
         case .connecting:
             statusBadge.setTitle("🟡 Đang kết nối...", for: .normal)
-            orbHintLabel.text = "Đang gọi\ncho em..."
+            orbHintLabel.text = "Đang kết nối\n\(speaker)..."
             powerButton.setTitle("✖️ Dừng", for: .normal)
             powerButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
         case .listeningUser:
-            statusBadge.setTitle("🟢 Đang nghe (\(modeText))", for: .normal)
-            orbHintLabel.text = liveService.isManualTurnMode
-                ? "Em đang nghe...\n(Chạm khi nói xong)"
-                : "Em đang nghe\nanh nói..."
+            if liveService.isUserTurnCapturing {
+                statusBadge.setTitle("🟢 Đang thu giọng (\(modeText))", for: .normal)
+                orbHintLabel.text = liveService.isManualTurnMode
+                    ? "Đang thu âm...\n(Chạm khi nói xong)"
+                    : "Đang nghe bạn nói...\n(Ngừng nói tự ngắt)"
+            } else {
+                statusBadge.setTitle("🟢 Đang nghe (\(modeText))", for: .normal)
+                orbHintLabel.text = liveService.isManualTurnMode
+                    ? "Hãy nói...\n(Chạm khi nói xong)"
+                    : "Hãy nói...\n(Tự ngắt khi dừng)"
+            }
             powerButton.setTitle("✖️ Dừng", for: .normal)
             powerButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
         case .waitingResponse:
-            statusBadge.setTitle("🟣 Em đang nghĩ...", for: .normal)
-            orbHintLabel.text = "Đợi em\nmột nhịp..."
+            statusBadge.setTitle("🟣 Đã ngắt Mic • Đang xử lý...", for: .normal)
+            orbHintLabel.text = "Đã ngắt Mic\nĐang suy nghĩ..."
         case .geminiSpeaking:
-            statusBadge.setTitle("💕 Em (\(liveService.voiceName)) đang nói", for: .normal)
-            orbHintLabel.text = "Em đang nói\n(Chạm để ngắt lời)"
+            statusBadge.setTitle("🔊 \(speaker) đang nói", for: .normal)
+            orbHintLabel.text = "\(speaker) đang nói\n(Chạm để ngắt lời)"
         case .muted:
             statusBadge.setTitle("🔴 Đã tắt Mic", for: .normal)
             orbHintLabel.text = "Đang tắt Mic"
@@ -1029,6 +1169,10 @@ extension LiveViewController: GeminiLiveServiceDelegate {
         updateUIForState(state)
     }
 
+    func didUpdateVoiceActivity(isSpeaking: Bool) {
+        updateUIForState(liveService.state)
+    }
+
     func didUpdateAudioLevel(_ level: CGFloat) {
         DispatchQueue.main.async { [weak self] in
             self?.targetAudioLevel = level
@@ -1046,11 +1190,11 @@ extension LiveViewController: GeminiLiveServiceDelegate {
         if isTurnComplete {
             let trimmedUser = activeUserStreamingText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedUser.isEmpty {
-                conversationHistory.append((speaker: "Anh", text: trimmedUser, isGemini: false))
+                conversationHistory.append((speaker: "Bạn", text: trimmedUser, isGemini: false))
             }
             let trimmedGemini = activeGeminiStreamingText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedGemini.isEmpty {
-                conversationHistory.append((speaker: "Em", text: trimmedGemini, isGemini: true))
+                conversationHistory.append((speaker: liveService.personaVibeStyle.speakerDisplayName, text: trimmedGemini, isGemini: true))
             }
             activeUserStreamingText = ""
             activeGeminiStreamingText = ""
